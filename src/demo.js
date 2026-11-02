@@ -48,21 +48,29 @@ export function fingerDemo() {
 // and pairs of crossed strings couple each joint to the one before, so all three bend together
 // and the whole motor force goes into the grip.
 export function fingerBeltDemo() {
-  const { d, palm, ph1, ph2, ph3, j0, j1, j2, hole, over, guide } = fingerBase();
+  const { d, palm, ph1, ph2, ph3, j0, j1, j2, over, guide } = fingerBase();
   const winch = { id: d.nextId++, x: 32, z: 48, layer: 1, r: 8, fmax: 8 };
   d.winches.push(winch);
   const w = { t: 'winch', id: winch.id };
-  // both run in the eyelets along the sides of the palm, so they stay in place
-  d.strings.push({ id: d.nextId++, kind: 'string', name: 'Flessore', wind: 1, anchors: [w, guide(palm, 3, -1), guide(palm, 5, -1), over(j0, 1), hole(ph1, 2)] });
-  d.strings.push({ id: d.nextId++, kind: 'string', name: 'Estensore', wind: -1, anchors: [w, guide(palm, 2, 1), guide(palm, 5, 1), over(j0, -1), hole(ph1, 2)] });
-  // crossed pairs: when a joint turns, one strand of the pair would have to stretch unless the next joint turns too
-  const cross = (name, a, pa, mid, pb, b) => {
-    // a stiff cord (3000 N/m) rather than an ideal one: crossing between layers the geometry is not
-    // perfectly length-preserving, and a little stretch keeps the pair from binding
-    d.strings.push({ id: d.nextId++, kind: 'string', name: name + ' A', stiffness: 3000, anchors: [a, over(pa, 1), mid, over(pb, -1), b] });
-    d.strings.push({ id: d.nextId++, kind: 'string', name: name + ' B', stiffness: 3000, anchors: [a, over(pa, -1), mid, over(pb, 1), b] });
+  // every cord runs in the eyelets on the sides of the beams (side -1 is the right side, +1 the left)
+  const R = -1, Lf = 1;
+  d.strings.push({ id: d.nextId++, kind: 'string', name: 'Flessore', wind: 1, anchors: [w, guide(palm, 3, R), guide(palm, 5, R), over(j0, 1), guide(ph1, 1, R), guide(ph1, 2, R)] });
+  d.strings.push({ id: d.nextId++, kind: 'string', name: 'Estensore', wind: -1, anchors: [w, guide(palm, 2, Lf), guide(palm, 5, Lf), over(j0, -1), guide(ph1, 1, Lf), guide(ph1, 2, Lf)] });
+  // crossed pairs (a figure of eight): when a joint turns, one strand of the pair would have to stretch
+  // unless the next joint turns too. Each strand changes side on the middle phalanx.
+  // A stiff cord (3000 N/m) rather than an ideal one: crossing between layers the geometry is not
+  // perfectly length-preserving, and a little stretch keeps the pair from binding.
+  const cross = (name, A, j, B, k, C) => {
+    for (const [suffix, s0] of [[' A', R], [' B', Lf]]) {
+      const s1 = -s0;
+      d.strings.push({ id: d.nextId++, kind: 'string', name: name + suffix, stiffness: 3000, anchors: [
+        guide(A.p, A.i, s0), guide(A.p, A.i + 1, s0), over(j, s0 === R ? 1 : -1),
+        guide(B.p, B.i, s0), guide(B.p, B.out, s1), over(k, s1 === R ? 1 : -1),
+        guide(C.p, C.i, s1), guide(C.p, C.i + 1, s1),
+      ] });
+    }
   };
-  cross('Accoppiamento 1-2', hole(palm, 4), j0, hole(ph1, 2), j1, hole(ph2, 2));
-  cross('Accoppiamento 2-3', hole(ph1, 2), j1, hole(ph2, 2), j2, hole(ph3, 2));
+  cross('Accoppiamento 1-2', { p: palm, i: 3 }, j0, { p: ph1, i: 1, out: 3 }, j1, { p: ph2, i: 1 });
+  cross('Accoppiamento 2-3', { p: ph1, i: 2 }, j1, { p: ph2, i: 1, out: 2 }, j2, { p: ph3, i: 1 });
   return d;
 }

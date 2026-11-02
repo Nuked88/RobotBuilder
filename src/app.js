@@ -6,7 +6,7 @@ import { fingerDemo, fingerBeltDemo } from './demo.js';
 import { openStore, lastProjectId, setLastProjectId, saveFile } from './storage.js';
 import {
   P, BEAM_W, LAYER, layerY, rad, emptyDoc, holePos, holeIndexAt, onGrid, snapGrid, topLayerAt, layerBehind, holeAt,
-  pinAt, pinMembers, findById, prune, BEAM_COLORS, PIN_LABEL, STRING_LABEL, BOARD, EPS, guidePos, anchorPos,
+  pinAt, pinMembers, findById, prune, BEAM_COLORS, PIN_LABEL, STRING_LABEL, BOARD, EPS, guidePos, anchorPos, mountOf,
 } from './model.js';
 
 const $ = (id) => document.getElementById(id);
@@ -43,22 +43,23 @@ let store = null;
 
 // ------------------------------------------------------------------ hint strip
 const HINTS = {
-  select: 'Clicca un pezzo per vederne le proprietà. In simulazione <b>trascinalo</b> per spingerlo con la mano.',
+  select: '<b>Trascina</b> una trave per spostarla (con <b>Shift</b> sposti tutto quello che è imperniato con lei). <b>Clicca</b> un pezzo o un filo per modificarlo a destra. <b>R</b> ruota la trave selezionata. In simulazione trascinando spingi i pezzi.',
   beam0: 'Clicca un <b>foro</b> (della tavola o di una trave) dove inizia la trave.',
   beam1: 'Muovi il mouse e clicca dove finisce. Ogni nuova trave nasce <b>imperniata</b> al foro di partenza. <b>Esc</b> per finire.',
   pin: 'Clicca un foro per metterci un perno: unisce il pezzo con quello che c\'è dietro. Clicca un perno esistente per <b>cambiarne il tipo</b>.',
   pulley: 'Clicca un foro per montarci una <b>puleggia</b>: il filo ci gira attorno e cambia direzione.',
   string0: 'Clicca il punto di partenza del filo: un <b>verricello</b> (filo motorizzato) o un foro.',
-  string1: 'Clicca i fori e le pulegge da cui passa. Sulla puleggia, clicca <b>dal lato</b> in cui vuoi il filo. Doppio clic o <b>Invio</b> per chiudere, <b>Esc</b> per annullare.',
+  string1: 'Clicca i fori, gli <b>occhielli</b> ai lati delle travi e le pulegge da cui passa. Sulla puleggia, clicca <b>dal lato</b> in cui vuoi il filo. Doppio clic o <b>Invio</b> per chiudere, <b>Esc</b> per annullare.',
   winch: 'Clicca un foro per montare un <b>verricello</b>: poi partici con un filo e lo comandi con lo slider.',
   erase: 'Clicca quello che vuoi togliere.',
+  reroute: 'Rifai il percorso: clicca di nuovo, in ordine, tutti i punti da cui passa il filo (verricello, fori, <b>occhielli</b>, pulegge). <b>Esc</b> lascia il percorso di prima.',
   run: 'Simulazione in corso: usa gli <b>slider</b> a destra o <b>trascina</b> i pezzi. Premi ■ per tornare a costruire.',
 };
 function updateHint() {
   let k = S.tool;
   if (S.mode === 'run') k = 'run';
   else if (S.tool === 'beam') k = S.draw ? 'beam1' : 'beam0';
-  else if (S.tool === 'string') k = S.stringDraft ? 'string1' : 'string0';
+  else if (S.tool === 'string') k = S.stringDraft?.replaceId != null && !S.stringDraft.anchors.length ? 'reroute' : S.stringDraft ? 'string1' : 'string0';
   $('hint').innerHTML = HINTS[k] || '';
 }
 
@@ -141,6 +142,7 @@ async function loadProject(p) {
   cancelDrafts();
   view.rebuild(S.doc);
   view.frontView(false);
+  if (S.doc.parts.length) { setTool('select', true); updateHint(); }
   schedulePreview();
   renderPanel();
   refreshUndoButtons();
@@ -168,6 +170,7 @@ function newProject(doc = emptyDoc(), name = 'Progetto senza nome') {
   cancelDrafts();
   view.rebuild(S.doc);
   view.frontView(S.doc.parts.length > 0);
+  if (S.doc.parts.length) { setTool('select', true); updateHint(); }
   schedulePreview();
   renderPanel();
   refreshUndoButtons();
@@ -573,6 +576,7 @@ function clickString(dbl) {
     return;
   }
   const list = S.stringDraft.anchors;
+  if (!list.length && a?.t === 'pulley') { toast('Il filo deve partire da un foro, un occhiello o un verricello.'); return; }
   const last = list[list.length - 1];
   const again = a && sameAnchor(a, last);
   if (again && a.t === 'pulley') { list[list.length - 1] = a; return; } // clicked the same pulley: just change side
@@ -591,6 +595,8 @@ function finishString() {
   while (d.anchors.length && d.anchors[d.anchors.length - 1].t === 'pulley') d.anchors.pop();
   if (d.anchors.length < 2) { toast('Un filo ha bisogno di almeno due punti.'); updateHint(); return; }
   pushUndo();
+  const old = d.replaceId != null ? S.doc.strings.find((x) => x.id === d.replaceId) : null;
+  if (old) { old.anchors = d.anchors; S.selected = old.id; commit(); updateHint(); return; }
   const s = { id: S.doc.nextId++, kind: d.kind, anchors: d.anchors };
   if (d.kind === 'elastic') { s.stiffness = 60; s.pretension = 3; }
   S.doc.strings.push(s);
@@ -681,10 +687,80 @@ canvas.addEventListener('pointerdown', (e) => {
     canvas.setPointerCapture(e.pointerId);
     return;
   }
+  if (S.mode === 'edit' && hit && hit.kind === 'part' && hit.point) {
+    startMove(hit.id, e.shiftKey, e.offsetX, e.offsetY);
+    view.controls.mouseButtons.LEFT = null;
+    canvas.setPointerCapture(e.pointerId);
+    return;
+  }
   view.controls.mouseButtons.LEFT = S.tool === 'select' && !hit ? THREE.MOUSE.ROTATE : null;
 }, { capture: true });
 
+// ---- moving beams in the editor: grab one and drop it on the grid. Pins used only by what is
+// being moved come along (so a beam pinned to the board stays pinned at its new place); pins shared
+// with other parts stay, so the beam comes off them. Holes dropped onto an existing pin join it.
+function startMove(partId, group, sx, sy) {
+  const doc = S.doc;
+  const ids = new Set([partId]);
+  if (group) {
+    // everything pinned to it, board excluded
+    for (let grown = true; grown;) {
+      grown = false;
+      for (const pin of doc.pins) {
+        const mem = pinMembers(doc, pin).filter((m) => m.kind === 'part').map((m) => m.part.id);
+        if (mem.some((id) => ids.has(id)) && mem.some((id) => !ids.has(id))) { mem.forEach((id) => ids.add(id)); grown = true; }
+      }
+    }
+  }
+  const part = doc.parts.find((p) => p.id === partId);
+  const pins = doc.pins.filter((pin) => { const mem = pinMembers(doc, pin).filter((m) => m.kind === 'part'); return mem.length && mem.every((m) => ids.has(m.part.id)); });
+  const wheels = [...doc.pulleys, ...doc.winches].filter((w) => { const m = mountOf(doc, w); return m.kind === 'part' && ids.has(m.part.id); });
+  const items = [...doc.parts.filter((p) => ids.has(p.id)), ...pins, ...wheels];
+  const p0 = view.planePoint(sx, sy, layerY(part.layer));
+  if (!p0) return;
+  S.move = { p0, items, orig: items.map((o) => ({ x: o.x, z: o.z })), dx: 0, dz: 0, undone: false, selectId: partId };
+}
+function updateMove(sx, sy) {
+  const m = S.move;
+  const p = view.planePoint(sx, sy, m.p0.y);
+  if (!p) return;
+  const dx = Math.round((p.x - m.p0.x) / P) * P, dz = Math.round((p.z - m.p0.z) / P) * P;
+  if (dx === m.dx && dz === m.dz) return;
+  if (!m.undone) { pushUndo(); m.undone = true; }
+  m.dx = dx; m.dz = dz;
+  m.items.forEach((o, k) => { o.x = m.orig[k].x + dx; o.z = m.orig[k].z + dz; });
+  view.rebuild(S.doc);
+  view.setHighlight(m.selectId, true, 0x3a6fd8);
+  schedulePreview();
+}
+// R: turn the selected beam 15 degrees about its first hole; pins and wheels used only by it turn too
+function rotateSelected(deg) {
+  const doc = S.doc;
+  const part = doc.parts.find((p) => p.id === S.selected);
+  if (!part) return;
+  const own = [
+    ...doc.pins.filter((pin) => { const mem = pinMembers(doc, pin).filter((m) => m.kind === 'part'); return mem.length && mem.every((m) => m.part.id === part.id); }),
+    ...[...doc.pulleys, ...doc.winches].filter((w) => { const m = mountOf(doc, w); return m.kind === 'part' && m.part.id === part.id; }),
+  ].filter((o) => Math.hypot(o.x - part.x, o.z - part.z) > EPS);
+  pushUndo();
+  const a = rad(deg), c = Math.cos(a), sn = Math.sin(a);
+  for (const o of own) {
+    const dx = o.x - part.x, dz = o.z - part.z;
+    o.x = Math.round((part.x + dx * c - dz * sn) * 1e6) / 1e6;
+    o.z = Math.round((part.z + dx * sn + dz * c) * 1e6) / 1e6;
+  }
+  part.angle = ((((part.angle + deg) + 180) % 360) + 360) % 360 - 180;
+  commit();
+}
+function endMove() {
+  const m = S.move;
+  S.move = null;
+  if (m.undone) { S.selected = m.selectId; commit(); }
+  else select(m.selectId);
+}
+
 canvas.addEventListener('pointermove', (e) => {
+  if (S.move) { updateMove(e.offsetX, e.offsetY); return; }
   if (S.drag) {
     const wp = view.planePoint(e.offsetX, e.offsetY, S.drag.planeY);
     if (wp) S.drag.target.copy(wp.multiplyScalar(0.001));
@@ -696,6 +772,7 @@ canvas.addEventListener('pointermove', (e) => {
 
 canvas.addEventListener('pointerup', (e) => {
   if (S.drag) { S.drag = null; S.sim?.clearForces(); canvas.releasePointerCapture(e.pointerId); return; }
+  if (S.move) { endMove(); canvas.releasePointerCapture(e.pointerId); down = null; return; }
   if (!down) return;
   const moved = Math.hypot(e.offsetX - down.x, e.offsetY - down.y) > 5;
   const b = down.b;
@@ -757,6 +834,7 @@ window.addEventListener('keydown', (e) => {
   if (k === ' ') { e.preventDefault(); startSim(); return; }
   if (k === 's') { toggleSchema(); return; }
   if ((k === 'delete' || k === 'backspace') && S.selected !== null && S.mode === 'edit') { pushUndo(); removeObject(S.selected); S.selected = null; commit(); return; }
+  if (k === 'r' && S.mode === 'edit' && S.selected !== null) { rotateSelected(e.shiftKey ? -15 : 15); return; }
   const map = { v: 'select', b: 'beam', p: 'pin', u: 'pulley', f: 'string', w: 'winch', x: 'erase' };
   if (map[k]) setTool(map[k]);
 });
@@ -996,6 +1074,12 @@ function renderInspector() {
     const sim = S.mode === 'run' ? S.sim : S.preview;
     if (sim) add(`<div class="prop"><label>Lunghezza</label><span class="num">${fmt(sim.tendonLength(o.id) * 1000, 1)} mm</span></div>`);
     if (S.mode === 'run' && S.sim) add(`<div class="prop"><label>Tensione</label><span class="num">${fmt(S.sim.tension(o.id), 2)} N</span></div>`);
+    const count = (t) => o.anchors.filter((a) => a.t === t).length;
+    const parts = [[count('guide'), 'occhiell', 'o', 'i'], [count('pulley'), 'puleg', 'gia', 'ge'], [count('hole'), 'for', 'o', 'i']].filter((x) => x[0]).map(([n, w, s1, sp]) => `${n} ${w}${n === 1 ? s1 : sp}`);
+    add(`<p class="empty">Passa da ${parts.join(', ') || 'due punti'}.</p>`);
+    const rb = add(`<button ${editable ? '' : 'disabled'}>Rifai il percorso</button>`);
+    rb.title = 'Riclicca i punti da cui passa: il filo tiene nome e impostazioni';
+    rb.onclick = () => { setTool('string'); S.stringDraft = { kind: o.kind, anchors: [], replaceId: o.id }; updateHint(); };
     delBtn();
   }
 }
