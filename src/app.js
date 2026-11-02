@@ -200,6 +200,18 @@ function runPreview() {
   renderControls();
 }
 
+// strings that jumped to the other side of a pulley during the run make everything shake
+function reportSnaps() {
+  S.snapsShown = S.sim.snaps.size;
+  const extra = [...S.sim.snaps].map((sid) => {
+    const s = S.doc.strings.find((x) => String(x.id) === String(sid));
+    return { level: 'warn', text: `${s ? stringName(s) : 'Un filo'} scatta dall'altra parte di una puleggia quando il giunto si piega: per questo trema. Di solito succede se è legato troppo vicino alla ruota (a un solo foro): legalo un foro più in là.`, ids: s ? [s.id] : [] };
+  });
+  S.warnings = [...S.sim.warnings, ...extra];
+  renderWarnings();
+  toast('Un filo scatta su una puleggia: guarda «Da controllare»');
+}
+
 function drawStrings() {
   const sim = S.mode === 'run' ? S.sim : S.preview;
   const paths = new Map(), tensions = {};
@@ -230,6 +242,7 @@ function startSim() {
   S.mode = 'run';
   S.paused = false;
   S.warnings = S.sim.warnings;
+  S.snapsShown = 0;
   renderWarnings();
   syncRunUI();
   renderPanel();
@@ -1091,7 +1104,10 @@ function frame(now) {
   const dt = Math.min(0.05, (now - last) / 1000);
   last = now;
   if (S.mode === 'run' && S.sim) {
-    if (!S.paused) S.sim.step(dt * S.speed, S.drag ? dragForce : null);
+    if (!S.paused) {
+      S.sim.step(dt * S.speed, S.drag ? dragForce : null);
+      if (S.sim.snaps.size > (S.snapsShown || 0)) reportSnaps();
+    }
     view.applySimPose(S.sim);
     const { tensions } = drawStrings();
     $('simTime').textContent = fmt(S.sim.time, 2) + ' s';

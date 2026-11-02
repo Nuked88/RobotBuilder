@@ -59,7 +59,7 @@ export function fingerBeltDemo() {
     d.strings.push({ id: d.nextId++, kind: 'string', name: name + ' A', stiffness: 3000, anchors: [a, over(pa, 1), mid, over(pb, -1), b] });
     d.strings.push({ id: d.nextId++, kind: 'string', name: name + ' B', stiffness: 3000, anchors: [a, over(pa, -1), mid, over(pb, 1), b] });
   };
-  cross('Accoppiamento 1-2', hole(palm, 4), j0, hole(ph1, 2), j1, hole(ph2, 1));
-  cross('Accoppiamento 2-3', hole(ph1, 3), j1, hole(ph2, 2), j2, hole(ph3, 1));
+  cross('Accoppiamento 1-2', hole(palm, 4), j0, hole(ph1, 2), j1, hole(ph2, 2));
+  cross('Accoppiamento 2-3', hole(ph1, 2), j1, hole(ph2, 2), j2, hole(ph3, 2));
   return d;
 }

@@ -51,6 +51,7 @@ export class Sim {
     }
     this.limitType = mj.mjtConstraint.mjCNSTR_LIMIT_TENDON.value;
     this.time = 0;
+    this.snaps = new Set(); // ids of strings seen jumping round a pulley
     this.setControls({});
     mj.mj_forward(this.model, this.data);
   }
@@ -70,9 +71,14 @@ export class Sim {
   step(seconds, drag) {
     const dt = this.model.opt.timestep;
     const n = Math.min(400, Math.max(1, Math.round(seconds / dt)));
+    const L = this.data.ten_length, tids = Object.entries(this.tendonId).filter(([, t]) => t >= 0);
     for (let i = 0; i < n; i++) {
       if (drag) drag(this);
+      const before = tids.map(([, t]) => L[t]);
       mj.mj_step(this.model, this.data);
+      // a string that jumps to the far side of a pulley changes length by millimetres in one
+      // half-millisecond step, far faster than anything can move: remember it, the app warns
+      tids.forEach(([sid, t], j) => { if (Math.abs(L[t] - before[j]) > 0.002) this.snaps.add(sid); });
     }
     this.time = this.data.time;
   }
