@@ -1,0 +1,103 @@
+<title>RobotBuilder</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..125,400..800&family=JetBrains+Mono:wght@400;600&display=swap">
+<div id="app">
+  <header class="bar">
+    <div class="brand"><span class="logo" aria-hidden="true"><i></i><i></i><i></i></span><span>RobotBuilder</span></div>
+    <input id="projName" class="projname" value="Progetto senza nome" aria-label="Nome del progetto" spellcheck="false">
+    <span id="saveState" class="savestate" title="">Non salvato</span>
+    <div class="spacer"></div>
+    <div class="group">
+      <button id="btnUndo" class="icon" title="Annulla (Ctrl+Z)" aria-label="Annulla"><svg viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/></svg></button>
+      <button id="btnRedo" class="icon" title="Ripeti (Ctrl+Y)" aria-label="Ripeti"><svg viewBox="0 0 24 24"><path d="m15 14 5-5-5-5"/><path d="M20 9H10a6 6 0 0 0 0 12h3"/></svg></button>
+    </div>
+    <div class="group">
+      <button id="btnProjects">Progetti</button>
+      <button id="btnExample">Esempio: dito</button>
+      <div class="menu">
+        <button id="btnFile">File ▾</button>
+        <div class="menupop" id="fileMenu" hidden>
+          <button id="btnNew">Nuovo progetto vuoto</button>
+          <button id="btnImport">Apri file JSON…</button>
+          <button id="btnExportJson">Scarica JSON</button>
+          <button id="btnExportMjcf">Scarica modello MuJoCo (MJCF)</button>
+        </div>
+      </div>
+      <input type="file" id="fileInput" accept=".json,application/json" hidden>
+    </div>
+    <div class="group run">
+      <button id="btnPlay" class="play" title="Avvia la simulazione (Spazio)"><svg viewBox="0 0 24 24"><path d="M7 4v16l13-8z"/></svg><span>Simula</span></button>
+      <button id="btnStop" class="icon" title="Torna a costruire (riporta i pezzi a posto)" aria-label="Ferma e ripristina" disabled><svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1"/></svg></button>
+    </div>
+  </header>
+
+  <nav class="tools" id="tools" aria-label="Attrezzi">
+    <button data-tool="select" title="Seleziona e trascina (V)"><svg viewBox="0 0 24 24"><path d="M5 3l14 8-6 2-2 6z"/></svg><span>Mano</span><kbd>V</kbd></button>
+    <button data-tool="beam" title="Trave forata (B)"><svg viewBox="0 0 24 24"><rect x="2" y="9" width="20" height="6" rx="3"/><circle cx="5.5" cy="12" r="1.2"/><circle cx="10" cy="12" r="1.2"/><circle cx="14" cy="12" r="1.2"/><circle cx="18.5" cy="12" r="1.2"/></svg><span>Trave</span><kbd>B</kbd></button>
+    <button data-tool="pin" title="Perno (P)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2.5"/></svg><span>Perno</span><kbd>P</kbd></button>
+    <button data-tool="pulley" title="Puleggia / rinvio (U)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="6"/><path d="M4 4l2 8M20 20l-2-8"/></svg><span>Puleggia</span><kbd>U</kbd></button>
+    <button data-tool="string" title="Filo (F)"><svg viewBox="0 0 24 24"><path d="M4 18c4-10 6 2 10-6s4-6 6-8"/><circle cx="4" cy="18" r="1.6"/><circle cx="20" cy="4" r="1.6"/></svg><span>Filo</span><kbd>F</kbd></button>
+    <button data-tool="winch" title="Verricello: motore che tira un filo (W)"><svg viewBox="0 0 24 24"><rect x="3" y="7" width="10" height="10" rx="1.5"/><circle cx="17" cy="12" r="4"/><path d="M17 8v-5"/></svg><span>Verricello</span><kbd>W</kbd></button>
+    <button data-tool="erase" title="Gomma (X)"><svg viewBox="0 0 24 24"><path d="M4 16l8-8 6 6-6 6H8z"/><path d="M14 20h6"/></svg><span>Gomma</span><kbd>X</kbd></button>
+  </nav>
+
+  <main class="stage">
+    <div id="viewport" class="viewport"></div>
+    <div class="subtools" id="subtools" hidden></div>
+    <div class="viewbtns">
+      <button id="btnFront" class="chip" title="Rimetti la vista di fronte">Vista frontale</button>
+      <label class="chip"><input type="checkbox" id="chkGravity" checked> Gravità</label>
+    </div>
+    <div class="runinfo" id="runinfo" hidden>
+      <span class="dot"></span><span id="simTime">0,00 s</span>
+      <button id="btnPause" class="chip">Pausa</button>
+      <label class="chip">Velocità <select id="selSpeed"><option value="0.1">0,1×</option><option value="0.25">0,25×</option><option value="0.5">0,5×</option><option value="1" selected>1×</option></select></label>
+    </div>
+    <div class="welcome" id="welcome" hidden>
+      <div class="card">
+        <h1>Costruisci, poi premi Simula</h1>
+        <ol>
+          <li><b>Trave</b>: clicca un foro della tavola, poi un secondo punto. Continua a cliccare per aggiungere falangi; ogni nuova trave è già imperniata alla precedente.</li>
+          <li><b>Puleggia</b>: clicca un foro per mettere un rinvio.</li>
+          <li><b>Filo</b>: clicca in sequenza i fori e le pulegge (dal lato in cui vuoi far passare il filo). Se parti da un <b>verricello</b>, il filo è motorizzato.</li>
+          <li><b>Simula</b>: muovi gli slider a destra o trascina i pezzi col mouse.</li>
+        </ol>
+        <p class="mouse">Tasto destro: ruota la vista · rotella: zoom · tasto centrale: sposta · Esc: annulla</p>
+        <div class="actions">
+          <button id="wExample" class="primary">Apri l'esempio del dito</button>
+          <button id="wEmpty">Parti da zero</button>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <aside class="panel" id="panel">
+    <section>
+      <h2>Comandi</h2>
+      <div id="controls" class="controls"></div>
+    </section>
+    <section>
+      <h2 id="inspTitle">Selezione</h2>
+      <div id="inspector" class="inspector"></div>
+    </section>
+    <section id="warnSec" hidden>
+      <h2>Da controllare</h2>
+      <ul id="warnings" class="warnings"></ul>
+    </section>
+  </aside>
+
+  <footer class="hint" id="hint" aria-live="polite"></footer>
+
+  <div class="dialog" id="projDialog" hidden>
+    <div class="card wide">
+      <div class="dhead"><h2>I tuoi progetti</h2><button id="projClose" class="icon" aria-label="Chiudi"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
+      <p id="projWhere" class="muted"></p>
+      <ul id="projList" class="projlist"></ul>
+      <div class="actions"><button id="projNew" class="primary">Nuovo progetto</button></div>
+    </div>
+  </div>
+  <div class="toast" id="toast" hidden></div>
+  <div class="loading" id="loading"><div class="spinner"></div><span>Carico il motore fisico…</span></div>
+</div>
+<script type="module" src="/src/app.js"></script>
