@@ -358,8 +358,75 @@ export class View {
       line.material.linewidth = this.selectedId === s.id ? 5 : style.width;
       xray.material.linewidth = Math.max(1.5, style.width * 0.6);
       line.userData.pts = pts;
+      this.updateMarks(s, line, pts, style.color, T, sim);
     }
-    for (const [id, l] of this.stringLines) if (!seen.has(id)) { l.removeFromParent(); l.userData.xray.removeFromParent(); l.geometry.dispose(); this.stringLines.delete(id); }
+    for (const [id, l] of this.stringLines) if (!seen.has(id)) { l.removeFromParent(); l.userData.xray.removeFromParent(); l.userData.marks?.removeFromParent(); l.userData.arrow?.removeFromParent(); l.geometry.dispose(); this.stringLines.delete(id); }
+  }
+
+  // Direction marks: small arrowheads fixed on the string material, every few millimetres from the end
+  // tied to the mechanism, pointing towards the winch. When the winch reels in they ride along the
+  // string towards it and disappear into the drum, so you see which way the string slides.
+  // In the simulation an arrow on the tied end shows the pull on that part.
+  updateMarks(s, line, pts, color, T, sim) {
+    const winchAtStart = s.anchors[0]?.t === 'winch';
+    const winchAtEnd = s.anchors[s.anchors.length - 1]?.t === 'winch';
+    let marks = line.userData.marks;
+    if (!winchAtStart && !winchAtEnd) { if (marks) marks.visible = false; if (line.userData.arrow) line.userData.arrow.visible = false; return; }
+    const path = winchAtStart ? pts : [...pts].reverse(); // from the winch to the tied end
+    if (!marks) {
+      const geo = new THREE.ConeGeometry(1.5, 3.6, 10);
+      const mat = new THREE.MeshBasicMaterial({ color, depthTest: false, transparent: true });
+      marks = new THREE.InstancedMesh(geo, mat, 160);
+      marks.renderOrder = 5;
+      marks.frustumCulled = false;
+      marks.raycast = () => {};
+      this.overlay.add(marks);
+      line.userData.marks = marks;
+    }
+    marks.visible = true;
+    marks.material.color.set(color);
+    // arclength measured from the tied end
+    const seg = [];
+    let total = 0;
+    for (let i = path.length - 1; i > 0; i--) {
+      const a = path[i], b = path[i - 1];
+      const L = Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+      seg.push({ a, b, L, s0: total });
+      total += L;
+    }
+    const spacing = 7, m = new THREE.Matrix4(), q = new THREE.Quaternion(), up = new THREE.Vector3(0, 1, 0), d = new THREE.Vector3();
+    let n = 0, k = 0;
+    for (let dist = spacing * 0.6; dist < total - 4 && n < 160; dist += spacing) {
+      while (k < seg.length - 1 && dist > seg[k].s0 + seg[k].L) k++;
+      const g = seg[k];
+      if (!g || g.L < 1e-6) continue;
+      const t = (dist - g.s0) / g.L;
+      d.set(g.b[0] - g.a[0], g.b[1] - g.a[1], g.b[2] - g.a[2]).normalize(); // towards the winch
+      q.setFromUnitVectors(up, d);
+      m.compose(new THREE.Vector3(g.a[0] + (g.b[0] - g.a[0]) * t, g.a[1] + (g.b[1] - g.a[1]) * t, g.a[2] + (g.b[2] - g.a[2]) * t), q, new THREE.Vector3(1, 1, 1));
+      marks.setMatrixAt(n++, m);
+    }
+    marks.count = n;
+    marks.instanceMatrix.needsUpdate = true;
+
+    // pull on the tied end
+    let arrow = line.userData.arrow;
+    const show = sim && T > 0.005 && path.length >= 2;
+    if (!show) { if (arrow) arrow.visible = false; return; }
+    if (!arrow) {
+      arrow = new THREE.ArrowHelper(new THREE.Vector3(1, 0, 0), new THREE.Vector3(), 10, color, 4, 3);
+      arrow.traverse((o) => { if (o.material) { o.material.depthTest = false; o.material.transparent = true; } o.renderOrder = 6; o.raycast = () => {}; });
+      this.overlay.add(arrow);
+      line.userData.arrow = arrow;
+    }
+    arrow.visible = true;
+    const end = path[path.length - 1], prev = path[path.length - 2];
+    d.set(prev[0] - end[0], prev[1] - end[1], prev[2] - end[2]).normalize();
+    arrow.position.set(end[0], end[1], end[2]);
+    arrow.setDirection(d);
+    const len = 6 + Math.min(1, T / (s.fmaxRef || 10)) * 26;
+    arrow.setLength(len, 4.5, 3.2);
+    arrow.setColor(color);
   }
 
   // ---------------------------------------------------------------- simulation pose
