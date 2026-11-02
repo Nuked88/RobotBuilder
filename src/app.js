@@ -206,7 +206,7 @@ function drawStrings() {
   if (sim) {
     for (const s of S.doc.strings) {
       const p = sim.tendonPath(s.id);
-      if (p) paths.set(s.id, p.map((q) => q.map((v) => v * 1000)));
+      if (p) { const mm = p.map((q) => q.map((v) => v * 1000)); mm.wraps = p.wraps; paths.set(s.id, mm); }
       if (S.mode === 'run') tensions[s.id] = sim.tension(s.id);
       const w = s.anchors.find((a) => a.t === 'winch');
       s.fmaxRef = w ? (S.doc.winches.find((x) => x.id === w.id)?.fmax ?? 10) : 3;

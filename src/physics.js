@@ -91,6 +91,7 @@ export class Sim {
     const adr = this.data.ten_wrapadr[t], num = this.data.ten_wrapnum[t];
     const xp = this.data.wrap_xpos, obj = this.data.wrap_obj;
     const pts = [];
+    pts.wraps = []; // index of the middle of each arc around a pulley
     for (let k = 0; k < num; k++) {
       const i = adr + k;
       const p = [xp[3 * i], xp[3 * i + 1], xp[3 * i + 2]];
@@ -110,6 +111,7 @@ export class Sim {
         for (let s = 1; s < steps; s++) {
           const ang = a0 + (d * s) / steps;
           pts.push([c[0] + r * Math.cos(ang), a[1] + ((p[1] - a[1]) * s) / steps, c[2] + r * Math.sin(ang)]);
+          if (s === Math.floor(steps / 2)) pts.wraps.push(pts.length - 1);
         }
       }
       pts.push(p);

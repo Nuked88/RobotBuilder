@@ -398,7 +398,7 @@ export class View {
       line.userData.pts = pts;
       this.updateMarks(s, line, pts, style.color, T, sim);
     }
-    for (const [id, l] of this.stringLines) if (!seen.has(id)) { l.removeFromParent(); l.userData.xray.removeFromParent(); l.userData.marks?.removeFromParent(); l.userData.arrow?.removeFromParent(); l.geometry.dispose(); this.stringLines.delete(id); }
+    for (const [id, l] of this.stringLines) if (!seen.has(id)) { l.removeFromParent(); l.userData.xray.removeFromParent(); l.userData.marks?.removeFromParent(); l.userData.arrow?.removeFromParent(); l.userData.dots?.removeFromParent(); l.userData.slide?.removeFromParent(); l.geometry.dispose(); this.stringLines.delete(id); }
   }
 
   // Direction marks: small arrowheads fixed on the string material, every few millimetres from the end
@@ -409,6 +409,7 @@ export class View {
     const winchAtStart = s.anchors[0]?.t === 'winch';
     const winchAtEnd = s.anchors[s.anchors.length - 1]?.t === 'winch';
     let marks = line.userData.marks;
+    this.updateSliding(s, line, pts, sim, !winchAtStart && !winchAtEnd && s.kind !== 'elastic');
     if (!winchAtStart && !winchAtEnd) { if (marks) marks.visible = false; if (line.userData.arrow) line.userData.arrow.visible = false; return; }
     const path = winchAtStart ? pts : [...pts].reverse(); // from the winch to the tied end
     if (!marks) {
@@ -465,6 +466,80 @@ export class View {
     const len = 6 + Math.min(1, T / (s.fmaxRef || 10)) * 26;
     arrow.setLength(len, 4.5, 3.2);
     arrow.setColor(color);
+  }
+
+  // Strings tied at both ends (the coupling cords) slide over their pulleys as the joints turn.
+  // Dots fixed on the cord material, counted from its first end, ride along with it; in the
+  // simulation a big arrow on each pulley shows which way the cord is running over it right now.
+  updateSliding(s, line, pts, sim, on) {
+    const ud = line.userData;
+    if (!on) { if (ud.dots) ud.dots.visible = false; if (ud.slide) ud.slide.visible = false; return; }
+    const color = stringColor(this.doc, s);
+    const mk = (geo, max, order) => {
+      const mesh = new THREE.InstancedMesh(geo, new THREE.MeshBasicMaterial({ color, depthTest: false, transparent: true }), max);
+      mesh.renderOrder = order; mesh.frustumCulled = false; mesh.raycast = () => {};
+      this.overlay.add(mesh);
+      return mesh;
+    };
+    if (!ud.dots) ud.dots = mk(new THREE.SphereGeometry(1.1, 10, 8), 200, 5);
+    if (!ud.slide) ud.slide = mk(new THREE.ConeGeometry(2.5, 6.5, 14), 16, 7);
+    ud.dots.visible = true;
+    ud.dots.material.color.set(color);
+    ud.slide.material.color.set(color);
+    // cumulative arclength from the first end
+    const acc = [0];
+    for (let i = 1; i < pts.length; i++) {
+      const a = pts[i - 1], b = pts[i];
+      acc.push(acc[i - 1] + Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]));
+    }
+    const total = acc[acc.length - 1];
+    const m = new THREE.Matrix4(), q = new THREE.Quaternion(), up = new THREE.Vector3(0, 1, 0), d = new THREE.Vector3(), one = new THREE.Vector3(1, 1, 1), at = new THREE.Vector3();
+    let n = 0, k = 1;
+    for (let dist = 3; dist < total - 2 && n < 200; dist += 6) {
+      while (k < pts.length - 1 && acc[k] < dist) k++;
+      const a = pts[k - 1], b = pts[k], L = acc[k] - acc[k - 1];
+      if (L < 1e-6) continue;
+      const t = (dist - acc[k - 1]) / L;
+      m.compose(at.set(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t), q.identity(), one);
+      ud.dots.setMatrixAt(n++, m);
+    }
+    ud.dots.count = n;
+    ud.dots.instanceMatrix.needsUpdate = true;
+
+    // sliding over each pulley: how fast the arclength from the first end to the pulley changes
+    const wraps = pts.wraps || [];
+    const now = sim ? sim.time : null;
+    const prev = ud.slidePrev;
+    const vel = (ud.slideVel ||= []);
+    const seen = (ud.slideSeen ||= []); // last direction and when it was last seen moving
+    const wall = performance.now();
+    if (!sim) { vel.length = 0; seen.length = 0; }
+    if (sim && prev && prev.n === wraps.length && now > prev.time) {
+      const dt = now - prev.time;
+      wraps.forEach((wi, j) => {
+        const v = (acc[wi] - prev.s[j]) / dt; // mm/s, > 0: the cord runs towards its first end
+        vel[j] = (vel[j] ?? 0) * 0.7 + v * 0.3;
+        if (Math.abs(vel[j]) > 0.3) seen[j] = { sign: vel[j] > 0 ? -1 : 1, at: wall, speed: Math.abs(vel[j]) };
+      });
+    }
+    if (sim && (!prev || now !== prev.time)) ud.slidePrev = { time: now, n: wraps.length, s: wraps.map((wi) => acc[wi]) };
+    if (!sim) ud.slidePrev = null;
+    // keep each arrow up for a moment after the cord stops, so a quick move can still be read
+    let c = 0;
+    wraps.forEach((wi, j) => {
+      const sj = seen[j];
+      if (!sj || wall - sj.at > 1500 || wi < 1 || wi >= pts.length - 1) return;
+      const a = pts[wi - 1], b = pts[wi + 1], p = pts[wi];
+      d.set(b[0] - a[0], b[1] - a[1], b[2] - a[2]).normalize().multiplyScalar(sj.sign);
+      q.setFromUnitVectors(up, d);
+      const sc = 1 + Math.min(1, sj.speed / 30) * 0.5;
+      // sit just ahead of the arc middle, on the way the cord is going
+      m.compose(at.set(p[0] + d.x * 2.5, p[1] + d.y * 2.5, p[2] + d.z * 2.5), q, new THREE.Vector3(sc, sc, sc));
+      ud.slide.setMatrixAt(c++, m);
+    });
+    ud.slide.count = c;
+    ud.slide.visible = c > 0;
+    ud.slide.instanceMatrix.needsUpdate = true;
   }
 
   // ---------------------------------------------------------------- simulation pose
