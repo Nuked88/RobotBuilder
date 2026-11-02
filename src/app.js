@@ -1,5 +1,6 @@
 import './style.css';
 import { View, THREE } from './scene.js';
+import { ViewCube } from './viewcube.js';
 import { initPhysics, Sim } from './physics.js';
 import { fingerDemo } from './demo.js';
 import { openStore, lastProjectId, setLastProjectId, saveFile } from './storage.js';
@@ -36,6 +37,8 @@ const S = {
 };
 
 const view = new View($('viewport'));
+const cube = new ViewCube($('navcube'), view);
+$('navcube').prepend(cube.renderer.domElement);
 let store = null;
 
 // ------------------------------------------------------------------ hint strip
@@ -955,6 +958,11 @@ $('btnStop').onclick = stopSim;
 $('btnPause').onclick = () => { S.paused = !S.paused; syncRunUI(); };
 $('selSpeed').onchange = (e) => (S.speed = +e.target.value);
 $('btnFront').onclick = () => view.frontView();
+$('btnProj').onclick = () => {
+  const ortho = view.camera !== view.ortho;
+  view.setOrthographic(ortho);
+  $('btnProj').textContent = ortho ? 'Ortogonale' : 'Prospettiva';
+};
 $('chkGravity').onchange = (e) => {
   pushUndo();
   S.doc.settings.gravity = e.target.checked;
@@ -1038,6 +1046,7 @@ function frame(now) {
     view.setLabels(ghostLabels);
   }
   view.render();
+  cube.render();
   requestAnimationFrame(frame);
 }
 let inspT = 0;

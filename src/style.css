@@ -93,7 +93,12 @@ button.primary { background: var(--accent); color: var(--accent-ink); border-col
 .subtools button { padding: 6px 10px; font-size: 13px; }
 .subtools button.on { background: var(--ink); color: var(--bg); border-color: var(--ink); }
 .subtools .lbl { align-self: center; color: var(--muted); font-size: 12px; padding: 0 4px; }
-.viewbtns { position: absolute; right: 12px; top: 12px; display: flex; gap: 6px; }
+.viewbtns { position: absolute; right: 12px; bottom: 12px; display: flex; gap: 6px; }
+.navcube { position: absolute; right: 8px; top: 8px; display: grid; justify-items: center; gap: 4px; }
+.navcube .viewcube { display: block; width: 112px; height: 112px; }
+.navbtns { display: flex; gap: 6px; align-items: center; }
+.navbtns .icon { border-radius: 999px; background: var(--surface); }
+.navbtns svg { width: 16px; height: 16px; }
 .chip { display: inline-flex; align-items: center; gap: 6px; background: var(--surface); border: 1px solid var(--line); border-radius: 999px; padding: 5px 11px; font-size: 12.5px; cursor: pointer; }
 .chip select { border: 0; background: transparent; }
 .runinfo { position: absolute; left: 12px; bottom: 12px; display: flex; gap: 8px; align-items: center; background: var(--surface); border: 1px solid var(--line); border-radius: 999px; padding: 4px 6px 4px 12px; font-family: var(--font-num); font-variant-numeric: tabular-nums; }

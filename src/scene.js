@@ -23,8 +23,13 @@ export class View {
 
     const scene = (this.scene = new THREE.Scene());
     this.setTheme(false);
-    const cam = (this.camera = new THREE.PerspectiveCamera(35, 1, 1, 5000));
-    cam.up.set(0, 0, 1);
+    this.persp = new THREE.PerspectiveCamera(35, 1, 1, 5000);
+    this.ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, -5000, 5000);
+    this.persp.up.set(0, 0, 1);
+    this.ortho.up.set(0, 0, 1);
+    this.orthoHalf = 150; // half height of the orthographic view (mm) at zoom 1
+    this.persp.position.set(0, -500, 150);
+    const cam = (this.camera = this.persp);
     this.controls = new OrbitControls(cam, r.domElement);
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.15;
@@ -81,21 +86,83 @@ export class View {
       const s = box.getSize(new THREE.Vector3());
       size = Math.max(120, s.x * 1.25, s.z * 1.4) + 40;
     }
-    const dist = size / (2 * Math.tan((this.camera.fov * Math.PI) / 360));
     const target = new THREE.Vector3(c.x, -16, c.z);
-    const pos = new THREE.Vector3(c.x + dist * 0.18, -16 - dist, c.z + dist * 0.28);
-    if (!animate) { this.camera.position.copy(pos); this.controls.target.copy(target); this.controls.update(); return; }
-    this.camAnim = { from: this.camera.position.clone(), to: pos, tf: this.controls.target.clone(), tt: target, t: 0 };
+    this.animateView(new THREE.Vector3(0, -1, 0), { target, size, animate });
+  }
+
+  // Distance that frames `size` mm in the perspective camera.
+  distFor(size) { return size / (2 * Math.tan((this.persp.fov * Math.PI) / 360)); }
+
+  // Swing the camera round to look along -dir (dir points from the target to the camera).
+  // Keeps the current distance unless a size to frame is given.
+  animateView(dir, { target = this.controls.target.clone(), size = null, animate = true } = {}) {
+    dir = dir.clone().normalize();
+    if (Math.abs(dir.z) > 0.999) dir.set(0, dir.z > 0 ? -1e-3 : 1e-3, Math.sign(dir.z)).normalize(); // exact top/bottom
+    const cur = this.camera.position.clone().sub(this.controls.target);
+    const fromDist = cur.length();
+    const toDist = size ? this.distFor(size) : fromDist;
+    if (size && this.camera === this.ortho) { this.orthoHalf = size / 2; this.ortho.zoom = 1; this.updateOrtho(); }
+    const a = {
+      q: new THREE.Quaternion().setFromUnitVectors(cur.clone().normalize(), dir),
+      from: cur.clone().normalize(), fromDist, toDist,
+      tf: this.controls.target.clone(), tt: target.clone(), t0: performance.now(), dur: animate ? 450 : 0,
+    };
+    this.camAnim = a;
+    if (!animate) this.stepCamAnim();
+  }
+
+  stepCamAnim() {
+    const a = this.camAnim;
+    if (!a) return;
+    const t = a.dur ? Math.min(1, (performance.now() - a.t0) / a.dur) : 1;
+    const e = 1 - Math.pow(1 - t, 3);
+    const q = new THREE.Quaternion().slerp(a.q, e);
+    const dir = a.from.clone().applyQuaternion(q);
+    const target = a.tf.clone().lerp(a.tt, e);
+    const dist = a.fromDist + (a.toDist - a.fromDist) * e;
+    this.controls.target.copy(target);
+    this.camera.position.copy(target).addScaledVector(dir, dist);
+    this.camera.lookAt(target);
+    if (t >= 1) { this.camAnim = null; this.controls.update(); }
+  }
+
+  setOrthographic(on) {
+    if (on === (this.camera === this.ortho)) return;
+    const target = this.controls.target;
+    const off = this.camera.position.clone().sub(target);
+    if (on) {
+      this.orthoHalf = off.length() * Math.tan((this.persp.fov * Math.PI) / 360);
+      this.ortho.zoom = 1;
+      this.ortho.position.copy(this.persp.position);
+      this.camera = this.ortho;
+      this.updateOrtho();
+    } else {
+      const half = this.orthoHalf / this.ortho.zoom;
+      const dist = half / Math.tan((this.persp.fov * Math.PI) / 360);
+      this.persp.position.copy(target).addScaledVector(off.normalize(), dist);
+      this.camera = this.persp;
+    }
+    this.controls.object = this.camera;
+    this.camera.lookAt(target);
+    this.controls.update();
+  }
+
+  updateOrtho() {
+    const asp = this.size ? this.size.w / Math.max(1, this.size.h) : 1;
+    const h = this.orthoHalf;
+    Object.assign(this.ortho, { left: -h * asp, right: h * asp, top: h, bottom: -h });
+    this.ortho.updateProjectionMatrix();
   }
 
   resize() {
     const w = this.container.clientWidth, h = this.container.clientHeight;
     this.renderer.setSize(w, h);
     this.labels.setSize(w, h);
-    this.camera.aspect = w / Math.max(1, h);
-    this.camera.updateProjectionMatrix();
-    for (const l of this.stringLines.values()) l.material.resolution.set(w, h);
     this.size = { w, h };
+    this.persp.aspect = w / Math.max(1, h);
+    this.persp.updateProjectionMatrix();
+    this.updateOrtho();
+    for (const l of this.stringLines.values()) { l.material.resolution.set(w, h); l.userData.xray.material.resolution.set(w, h); }
   }
 
   buildBoard() {
@@ -259,29 +326,40 @@ export class View {
       if (pts.length < 2) continue;
       let line = this.stringLines.get(s.id);
       if (!line) {
-        const mat = new LineMaterial({ linewidth: 3.2, vertexColors: false, worldUnits: false, dashed: false, dashSize: 3, gapSize: 2.5 });
+        const mat = new LineMaterial({ linewidth: 3.2, worldUnits: false, dashed: false, dashSize: 3, gapSize: 2.5 });
         mat.resolution.set(this.size.w, this.size.h);
         line = new Line2(new LineGeometry(), mat);
         line.userData = { id: s.id, kind: 'string' };
-        line.renderOrder = 2;
-        this.overlay.add(line);
+        line.renderOrder = 3;
+        // the same string drawn faintly through beams and pulleys, so its whole route stays readable
+        const xmat = new LineMaterial({ linewidth: 2, worldUnits: false, dashed: false, dashSize: 3, gapSize: 2.5, transparent: true, opacity: 0.38, depthTest: false, depthWrite: false });
+        xmat.resolution.set(this.size.w, this.size.h);
+        const xray = new Line2(line.geometry, xmat);
+        xray.renderOrder = 2;
+        line.userData.xray = xray;
+        this.overlay.add(xray, line);
         this.stringLines.set(s.id, line);
       }
+      const xray = line.userData.xray;
       const flat = pts.flat();
       if (line.geometry.attributes.instanceStart?.count !== pts.length - 1) {
         line.geometry.dispose();
         line.geometry = new LineGeometry();
+        xray.geometry = line.geometry;
       }
       line.geometry.setPositions(flat);
       line.computeLineDistances();
       const T = tensions[s.id];
       const style = stringStyle(s, T, sim, this.dark);
-      line.material.color.set(style.color);
-      if (line.material.dashed !== style.dashed) { line.material.dashed = style.dashed; line.material.needsUpdate = true; }
+      for (const l of [line, xray]) {
+        l.material.color.set(style.color);
+        if (l.material.dashed !== style.dashed) { l.material.dashed = style.dashed; l.material.needsUpdate = true; }
+      }
       line.material.linewidth = this.selectedId === s.id ? 5 : style.width;
+      xray.material.linewidth = Math.max(1.5, style.width * 0.6);
       line.userData.pts = pts;
     }
-    for (const [id, l] of this.stringLines) if (!seen.has(id)) { l.removeFromParent(); l.geometry.dispose(); this.stringLines.delete(id); }
+    for (const [id, l] of this.stringLines) if (!seen.has(id)) { l.removeFromParent(); l.userData.xray.removeFromParent(); l.geometry.dispose(); this.stringLines.delete(id); }
   }
 
   // ---------------------------------------------------------------- simulation pose
@@ -326,15 +404,8 @@ export class View {
   }
 
   render() {
-    if (this.camAnim) {
-      const a = this.camAnim;
-      a.t = Math.min(1, a.t + 0.06);
-      const e = 1 - Math.pow(1 - a.t, 3);
-      this.camera.position.lerpVectors(a.from, a.to, e);
-      this.controls.target.lerpVectors(a.tf, a.tt, e);
-      if (a.t >= 1) this.camAnim = null;
-    }
-    this.controls.update();
+    if (this.camAnim) this.stepCamAnim();
+    else this.controls.update();
     this.renderer.render(this.scene, this.camera);
     this.labels.render(this.scene, this.camera);
   }

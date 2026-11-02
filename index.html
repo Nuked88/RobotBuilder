@@ -45,8 +45,13 @@
   <main class="stage">
     <div id="viewport" class="viewport"></div>
     <div class="subtools" id="subtools" hidden></div>
+    <div class="navcube" id="navcube">
+      <div class="navbtns">
+        <button id="btnFront" class="icon" title="Vista frontale, centrata sul modello" aria-label="Vista frontale"><svg viewBox="0 0 24 24"><path d="M4 11 12 4l8 7"/><path d="M6 10v9h12v-9"/></svg></button>
+        <button id="btnProj" class="chip" title="Passa tra vista in prospettiva e ortogonale (senza prospettiva, tutto in asse)">Prospettiva</button>
+      </div>
+    </div>
     <div class="viewbtns">
-      <button id="btnFront" class="chip" title="Rimetti la vista di fronte">Vista frontale</button>
       <label class="chip"><input type="checkbox" id="chkGravity" checked> Gravità</label>
     </div>
     <div class="runinfo" id="runinfo" hidden>
