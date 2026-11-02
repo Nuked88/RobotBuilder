@@ -173,10 +173,11 @@ export function buildMJCF(doc, opts = {}) {
       const k = s.stiffness ?? 60;
       if (rest !== undefined) attrs = ` stiffness="${f(k)}" springlength="0 ${f(Math.max(0.001, rest - pre))}"`;
     } else if (!winch && rest !== undefined) {
-      attrs = ` limited="true" range="0 ${f(rest)}"`;
+      // a plain string: inextensible (hard limit), or a stiff cord that stretches a little if it has a stiffness
+      attrs = s.stiffness > 0 ? ` stiffness="${f(s.stiffness)}" springlength="0 ${f(rest)}"` : ` limited="true" range="0 ${f(rest)}"`;
     }
     tendonXml.push(`<spatial name="${tname}" width="0.0006" damping="0.3"${attrs}>${path}</spatial>`);
-    meta.strings[s.id] = { tendon: tname, kind: s.kind, winch: winch ? winch.id : null };
+    meta.strings[s.id] = { tendon: tname, kind: s.kind, winch: winch ? winch.id : null, wind: s.wind === -1 ? -1 : 1 };
     if (winch) {
       const fmax = winch.fmax ?? 10;
       const len = rest ?? 0.1;

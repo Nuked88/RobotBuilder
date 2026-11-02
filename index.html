@@ -14,7 +14,13 @@
     </div>
     <div class="group">
       <button id="btnProjects">Progetti</button>
-      <button id="btnExample">Esempio: dito</button>
+      <div class="menu">
+        <button id="btnExample">Esempi ▾</button>
+        <div class="menupop" id="exMenu" hidden>
+          <button id="btnEx1"><b>Dito con elastici</b><br><span class="sub">Il verricello chiude, tre elastici riaprono</span></button>
+          <button id="btnEx2"><b>Dito a cinghia</b><br><span class="sub">Un filo chiude e uno riapre, falangi accoppiate, niente molle</span></button>
+        </div>
+      </div>
       <div class="menu">
         <button id="btnFile">File ▾</button>
         <div class="menupop" id="fileMenu" hidden>
@@ -70,7 +76,8 @@
         </ol>
         <p class="mouse">Tasto destro: ruota la vista · rotella: zoom · tasto centrale: sposta · Esc: annulla</p>
         <div class="actions">
-          <button id="wExample" class="primary">Apri l'esempio del dito</button>
+          <button id="wExample" class="primary">Esempio: dito con elastici</button>
+          <button id="wExample2" class="primary">Esempio: dito a cinghia</button>
           <button id="wEmpty">Parti da zero</button>
         </div>
       </div>

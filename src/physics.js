@@ -55,12 +55,14 @@ export class Sim {
     mj.mj_forward(this.model, this.data);
   }
 
-  // controls: { winch: {stringId: pullMm}, servo: {pinId: deg} }
+  // controls: { winch: {winchId: mm the drum has turned}, servo: {pinId: deg} }
+  // A string that winds on the drum gets shorter by that much, one that unwinds gets longer.
   setControls(c) {
     const ctrl = this.data.ctrl;
     for (const [sid, a] of Object.entries(this.actId)) {
-      const pull = (c.winch?.[sid] ?? 0) / 1000;
-      ctrl[a] = Math.max(0, (this.lengths[sid] ?? 0) - pull);
+      const info = this.meta.strings[sid];
+      const turn = (c.winch?.[info.winch] ?? 0) / 1000;
+      ctrl[a] = Math.max(0, (this.lengths[sid] ?? 0) - info.wind * turn);
     }
     for (const [pid, a] of Object.entries(this.servoId)) ctrl[a] = ((c.servo?.[pid] ?? 0) * Math.PI) / 180;
   }
@@ -123,7 +125,7 @@ export class Sim {
     const a = this.actId[sid];
     if (a !== undefined && a >= 0) T += -this.data.actuator_force[a];
     const info = this.meta.strings[sid];
-    if (info.kind === 'elastic') {
+    if (info.kind === 'elastic' || this.model.tendon_stiffness[t] > 0) {
       const L = this.data.ten_length[t];
       const rest = this.model.tendon_lengthspring[2 * t + 1];
       const k = this.model.tendon_stiffness[t];

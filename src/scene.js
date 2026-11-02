@@ -341,8 +341,9 @@ export class View {
         this.stringLines.set(s.id, line);
       }
       const xray = line.userData.xray;
-      const flat = pts.flat();
-      if (line.geometry.attributes.instanceStart?.count !== pts.length - 1) {
+      const drawn = s.kind === 'elastic' ? zigzag(pts, line.userData) : pts;
+      const flat = drawn.flat();
+      if (line.geometry.attributes.instanceStart?.count !== drawn.length - 1) {
         line.geometry.dispose();
         line.geometry = new LineGeometry();
         xray.geometry = line.geometry;
@@ -401,7 +402,7 @@ export class View {
       const g = seg[k];
       if (!g || g.L < 1e-6) continue;
       const t = (dist - g.s0) / g.L;
-      d.set(g.b[0] - g.a[0], g.b[1] - g.a[1], g.b[2] - g.a[2]).normalize(); // towards the winch
+      d.set(g.b[0] - g.a[0], g.b[1] - g.a[1], g.b[2] - g.a[2]).normalize().multiplyScalar(s.wind === -1 ? -1 : 1); // the way the string slides as the drum turns
       q.setFromUnitVectors(up, d);
       m.compose(new THREE.Vector3(g.a[0] + (g.b[0] - g.a[0]) * t, g.a[1] + (g.b[1] - g.a[1]) * t, g.a[2] + (g.b[2] - g.a[2]) * t), q, new THREE.Vector3(1, 1, 1));
       marks.setMatrixAt(n++, m);
@@ -515,6 +516,40 @@ export class View {
     if (hits.length) return { id: hits[0].object.userData.id, kind: hits[0].object.userData.kind, point: hits[0].point, object: hits[0].object };
     return null;
   }
+}
+
+// Elastic drawn as a spring: each straight stretch gets a fixed number of coils, chosen the first
+// time it is drawn, so the coils open up as the band stretches.
+function zigzag(pts, store) {
+  const segs = pts.length - 1;
+  if (!store.coils || store.coils.length !== segs) {
+    store.coils = [];
+    for (let i = 0; i < segs; i++) {
+      const L = Math.hypot(pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1], pts[i + 1][2] - pts[i][2]);
+      store.coils.push(L > 5 ? Math.max(2, Math.round(L / 2.6)) : 0);
+    }
+  }
+  const out = [pts[0]];
+  const a = new THREE.Vector3(), b = new THREE.Vector3(), dir = new THREE.Vector3(), n = new THREE.Vector3();
+  for (let i = 0; i < segs; i++) {
+    a.set(...pts[i]); b.set(...pts[i + 1]);
+    const k = store.coils[i];
+    if (k) {
+      dir.subVectors(b, a);
+      n.crossVectors(dir, new THREE.Vector3(0, 1, 0));
+      if (n.lengthSq() < 1e-8) n.set(1, 0, 0);
+      n.normalize().multiplyScalar(1.6);
+      const lead = 0.12; // straight bit at each end
+      for (let j = 0; j <= 2 * k; j++) {
+        const t = lead + ((1 - 2 * lead) * j) / (2 * k);
+        const side = j === 0 || j === 2 * k ? 0 : j % 2 ? 1 : -1;
+        const p = a.clone().lerp(b, t).addScaledVector(n, side);
+        out.push([p.x, p.y, p.z]);
+      }
+    }
+    out.push(pts[i + 1]);
+  }
+  return out;
 }
 
 function segDist(px, py, a, b) {

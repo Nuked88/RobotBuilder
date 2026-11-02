@@ -67,6 +67,8 @@ button.primary { background: var(--accent); color: var(--accent-ink); border-col
 .menupop { position: absolute; right: 0; top: calc(100% + 6px); background: var(--raised); border: 1px solid var(--line); border-radius: var(--r); padding: 6px; display: grid; gap: 2px; z-index: 30; min-width: 260px; box-shadow: 0 10px 30px rgb(0 0 0 / .18); }
 .menupop button { border: 0; text-align: left; background: transparent; }
 .menupop button:hover { background: var(--surface); }
+.menupop .sub { color: var(--muted); font-size: 12px; }
+.menupop button { line-height: 1.35; }
 
 /* tool rail */
 .tools { grid-area: tools; display: flex; flex-direction: column; gap: 6px; padding: 10px 8px; padding-left: max(8px, env(safe-area-inset-left, 0px)); background: var(--surface); border-right: 1px solid var(--line); overflow-y: auto; }
@@ -114,6 +116,11 @@ button.primary { background: var(--accent); color: var(--accent-ink); border-col
 .ctl .row { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
 .ctl .name { font-weight: 600; }
 .ctl .val { font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 12.5px; }
+.strrow { display: grid; grid-template-columns: 1fr auto; gap: 3px 8px; align-items: baseline; }
+.strrow .meter { grid-column: 1 / -1; height: 4px; }
+.strrow .sname { font-size: 13px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.strrow .wind { font: 600 11px var(--font-num); color: var(--muted); }
+.val.muted { color: var(--muted); }
 .ctl input[type=range] { width: 100%; accent-color: var(--accent); }
 .meter { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; }
 .meter i { display: block; height: 100%; width: 0; background: var(--go); transition: width .1s; }

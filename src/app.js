@@ -2,7 +2,7 @@ import './style.css';
 import { View, THREE } from './scene.js';
 import { ViewCube } from './viewcube.js';
 import { initPhysics, Sim } from './physics.js';
-import { fingerDemo } from './demo.js';
+import { fingerDemo, fingerBeltDemo } from './demo.js';
 import { openStore, lastProjectId, setLastProjectId, saveFile } from './storage.js';
 import {
   P, BEAM_W, LAYER, layerY, rad, emptyDoc, holePos, holeIndexAt, onGrid, snapGrid, topLayerAt, layerBehind, holeAt,
@@ -731,41 +731,55 @@ window.addEventListener('keydown', (e) => {
 // ------------------------------------------------------------------ side panel
 function renderPanel() { renderControls(); renderInspector(); renderWarnings(); }
 
+// Strings tied to a winch: [{s, wind}] where wind is +1 (winds on, pulls) or -1 (unwinds, pays out).
+function winchStrings(w) {
+  const out = [];
+  for (const s of S.doc.strings) {
+    const first = s.anchors[0], last = s.anchors[s.anchors.length - 1];
+    if ((first?.t === 'winch' && first.id === w.id) || (last?.t === 'winch' && last.id === w.id)) out.push({ s, wind: s.wind === -1 ? -1 : 1 });
+  }
+  return out;
+}
+
 function renderControls() {
   const el = $('controls');
   el.innerHTML = '';
   const doc = S.doc;
   const items = [];
-  for (const s of doc.strings) {
-    const w = s.anchors[0]?.t === 'winch' ? s.anchors[0] : s.anchors[s.anchors.length - 1]?.t === 'winch' ? s.anchors[s.anchors.length - 1] : null;
-    if (!w) continue;
-    const winch = doc.winches.find((x) => x.id === w.id);
-    if (!winch) continue;
-    const L0 = (S.preview?.lengths?.[s.id] ?? S.sim?.lengths?.[s.id] ?? 0.1) * 1000;
-    const max = Math.max(10, Math.floor(L0 * 0.8));
-    items.push({ kind: 'winch', s, winch, max });
+  for (const w of doc.winches) {
+    const list = winchStrings(w);
+    if (!list.length) continue;
+    const lens = list.filter((x) => x.wind === 1).map((x) => (S.preview?.lengths?.[x.s.id] ?? S.sim?.lengths?.[x.s.id] ?? 0.1) * 1000);
+    const max = Math.max(10, Math.floor(Math.min(...(lens.length ? lens : [60])) * 0.8));
+    items.push({ kind: 'winch', w, list, max });
   }
   for (const pin of doc.pins) if (pin.type === 'servo') items.push({ kind: 'servo', pin });
   if (!items.length) {
     el.innerHTML = '<p class="empty">Qui compaiono gli slider dei motori. Monta un <b>verricello</b> e fai partire un filo da lì, oppure metti un perno <b>servo</b>.</p>';
     return;
   }
-  items.forEach((it, idx) => {
+  let nw = 0, ns = 0;
+  for (const it of items) {
     const box = document.createElement('div');
     box.className = 'ctl';
-    const id = `ctl_${it.kind}_${it.kind === 'winch' ? it.s.id : it.pin.id}`;
     if (it.kind === 'winch') {
-      const v = S.controls.winch[it.s.id] ?? 0;
-      box.innerHTML = `<div class="row"><label class="name" for="${id}">${escapeHtml(it.s.name || 'Verricello ' + (idx + 1))}</label><span class="val" data-v>tira ${fmt(v, 0)} mm</span></div>
+      const id = `ctl_w${it.w.id}`;
+      const v = S.controls.winch[it.w.id] ?? 0;
+      const rows = it.list.map(({ s, wind }) => `<div class="strrow" data-sid="${s.id}">
+          <span class="sname"><span class="wind">${wind === 1 ? '⟲ avvolge' : '⟳ svolge'}</span> ${escapeHtml(s.name || 'Filo')}</span><span class="val" data-t>—</span>
+          <div class="meter" data-m><i></i></div></div>`).join('');
+      box.innerHTML = `<div class="row"><label class="name" for="${id}">Verricello ${++nw}</label><span class="val" data-v>gira ${fmt(v, 0)} mm</span></div>
         <input type="range" id="${id}" min="0" max="${it.max}" step="0.5" value="${v}">
-        <div class="row"><span class="val" data-t>tensione —</span><span class="val">max ${fmt(it.winch.fmax ?? 10, 0)} N</span></div>
-        <div class="meter" data-m><i></i></div><div class="note" data-n hidden></div>`;
+        ${rows}
+        <div class="row"><span class="val muted">forza max per filo</span><span class="val">${fmt(it.w.fmax ?? 10, 0)} N</span></div>
+        <div class="note" data-n hidden></div>`;
       const r = box.querySelector('input');
-      r.oninput = () => { S.controls.winch[it.s.id] = +r.value; box.querySelector('[data-v]').textContent = `tira ${fmt(+r.value, 0)} mm`; S.sim?.setControls(S.controls); markDirty(); };
-      box.dataset.sid = it.s.id;
+      r.oninput = () => { S.controls.winch[it.w.id] = +r.value; box.querySelector('[data-v]').textContent = `gira ${fmt(+r.value, 0)} mm`; S.sim?.setControls(S.controls); markDirty(); };
+      box.dataset.winch = it.w.id;
     } else {
+      const id = `ctl_p${it.pin.id}`;
       const v = S.controls.servo[it.pin.id] ?? 0;
-      box.innerHTML = `<div class="row"><label class="name" for="${id}">Servo ${idx + 1}</label><span class="val" data-v>${fmt(v, 0)}°</span></div>
+      box.innerHTML = `<div class="row"><label class="name" for="${id}">Servo ${++ns}</label><span class="val" data-v>${fmt(v, 0)}°</span></div>
         <input type="range" id="${id}" min="-150" max="150" step="1" value="${v}">
         <div class="row"><span class="val" data-t>coppia —</span><span class="val">max ${fmt((it.pin.tmax ?? 0.2) * 100, 0)} N·cm</span></div>
         <div class="meter" data-m><i></i></div><div class="note" data-n hidden></div>`;
@@ -774,7 +788,7 @@ function renderControls() {
       box.dataset.pin = it.pin.id;
     }
     el.appendChild(box);
-  });
+  }
   if (S.mode !== 'run') {
     const p = document.createElement('p');
     p.className = 'empty';
@@ -787,26 +801,31 @@ function updateLiveReadouts() {
   const sim = S.sim;
   if (!sim) return;
   for (const box of $('controls').querySelectorAll('.ctl')) {
-    let val, max, label, note = '';
-    if (box.dataset.sid) {
-      const sid = +box.dataset.sid;
-      const s = S.doc.strings.find((x) => x.id === sid);
-      const w = S.doc.winches.find((x) => x.id === (s.anchors[0].t === 'winch' ? s.anchors[0].id : s.anchors[s.anchors.length - 1].id));
-      val = sim.tension(sid); max = w?.fmax ?? 10;
-      label = `tensione ${fmt(val, 2)} N`;
-      if (val >= max * 0.98) note = 'Il motore è al limite: non ce la fa a tirare di più.';
-      else if (val < 0.005) note = 'Filo lasco: non sta tirando niente.';
+    let note = '';
+    if (box.dataset.winch) {
+      const w = S.doc.winches.find((x) => x.id === +box.dataset.winch);
+      const max = w?.fmax ?? 10;
+      for (const row of box.querySelectorAll('.strrow')) {
+        const sid = +row.dataset.sid;
+        const s = S.doc.strings.find((x) => x.id === sid);
+        const T = sim.tension(sid);
+        row.querySelector('[data-t]').textContent = `${fmt(T, 2)} N`;
+        const m = row.querySelector('[data-m]');
+        m.querySelector('i').style.width = Math.min(100, (T / max) * 100) + '%';
+        m.classList.toggle('hot', T >= max * 0.98);
+        if (T >= max * 0.98) note = 'Il motore è al limite: non ce la fa a tirare di più.';
+        else if (!note && T < 0.005 && s?.wind !== -1 && (S.controls.winch[w.id] ?? 0) > 0) note = `${s?.name || 'Il filo'} è lasco: non sta tirando niente.`;
+      }
     } else {
       const pid = +box.dataset.pin;
       const pin = S.doc.pins.find((x) => x.id === pid);
-      val = Math.abs(sim.servoTorque(pid)); max = pin?.tmax ?? 0.2;
-      label = `coppia ${fmt(val * 100, 1)} N·cm`;
+      const val = Math.abs(sim.servoTorque(pid)), max = pin?.tmax ?? 0.2;
+      box.querySelector('[data-t]').textContent = `coppia ${fmt(val * 100, 1)} N·cm`;
+      const m = box.querySelector('[data-m]');
+      m.querySelector('i').style.width = Math.min(100, (val / max) * 100) + '%';
+      m.classList.toggle('hot', val >= max * 0.98);
       if (val >= max * 0.98) note = 'Il servo è al limite di coppia.';
     }
-    box.querySelector('[data-t]').textContent = label;
-    const m = box.querySelector('[data-m]');
-    m.querySelector('i').style.width = Math.min(100, (val / max) * 100) + '%';
-    m.classList.toggle('hot', val >= max * 0.98);
     const n = box.querySelector('[data-n]');
     n.hidden = !note;
     n.textContent = note;
@@ -896,9 +915,23 @@ function renderInspector() {
       seg.appendChild(b);
     }
     add(`<div class="prop"><label>Passa per</label><span class="num">${o.anchors.length} punti</span></div>`);
+    const onWinch = o.anchors[0]?.t === 'winch' || o.anchors[o.anchors.length - 1]?.t === 'winch';
+    if (onWinch) {
+      add('<p class="empty">Sul tamburo del verricello questo filo:</p>');
+      const seg = add('<div class="seg"></div>');
+      for (const [v, txt] of [[1, '⟲ si avvolge (tira)'], [-1, '⟳ si svolge (rilascia)']]) {
+        const b = document.createElement('button');
+        b.textContent = txt; b.className = (o.wind === -1 ? -1 : 1) === v ? 'on' : ''; b.disabled = !editable;
+        b.onclick = () => { pushUndo(); if (v === -1) o.wind = -1; else delete o.wind; commit(); };
+        seg.appendChild(b);
+      }
+      add('<p class="empty">Due fili sullo stesso verricello, uno che si avvolge e uno che si svolge, lavorano come una cinghia: uno chiude, l\'altro riapre.</p>');
+    }
     if (o.kind === 'elastic') {
       numProp('Rigidezza', o.stiffness ?? 60, 1, 5000, 5, (v) => (o.stiffness = v), 'N/m');
       numProp('Precarico', o.pretension ?? 3, 0, 50, 0.5, (v) => (o.pretension = v), 'mm');
+    } else if (!onWinch) {
+      numProp('Rigidezza (0 = non si allunga)', o.stiffness ?? 0, 0, 100000, 100, (v) => { if (v > 0) o.stiffness = v; else delete o.stiffness; }, 'N/m');
     }
     const sim = S.mode === 'run' ? S.sim : S.preview;
     if (sim) add(`<div class="prop"><label>Lunghezza</label><span class="num">${fmt(sim.tendonLength(o.id) * 1000, 1)} mm</span></div>`);
@@ -969,9 +1002,11 @@ $('chkGravity').onchange = (e) => {
   commit();
   if (S.mode === 'run') { stopSim(); startSim(); }
 };
-$('btnExample').onclick = () => { newProject(fingerDemo(), 'Dito a tendine'); toast('Esempio caricato: premi Simula e muovi lo slider del flessore.'); };
-$('btnFile').onclick = (e) => { e.stopPropagation(); $('fileMenu').hidden = !$('fileMenu').hidden; };
-document.addEventListener('click', () => ($('fileMenu').hidden = true));
+$('btnExample').onclick = (e) => { e.stopPropagation(); $('exMenu').hidden = !$('exMenu').hidden; $('fileMenu').hidden = true; };
+$('btnEx1').onclick = () => { newProject(fingerDemo(), 'Dito con elastici'); toast('Esempio caricato: premi Simula e muovi lo slider del verricello.'); };
+$('btnEx2').onclick = () => { newProject(fingerBeltDemo(), 'Dito a cinghia'); toast('Esempio caricato: premi Simula e muovi lo slider del verricello.'); };
+$('btnFile').onclick = (e) => { e.stopPropagation(); $('fileMenu').hidden = !$('fileMenu').hidden; $('exMenu').hidden = true; };
+document.addEventListener('click', () => { $('fileMenu').hidden = true; $('exMenu').hidden = true; });
 $('btnNew').onclick = () => newProject();
 $('btnImport').onclick = () => $('fileInput').click();
 $('fileInput').onchange = async (e) => {
@@ -1001,7 +1036,8 @@ $('projName').onchange = (e) => { S.projectName = e.target.value.trim() || 'Prog
 $('btnProjects').onclick = openProjects;
 $('projClose').onclick = () => ($('projDialog').hidden = true);
 $('projNew').onclick = () => { newProject(); $('projDialog').hidden = true; };
-$('wExample').onclick = () => { $('welcome').hidden = true; newProject(fingerDemo(), 'Dito a tendine'); };
+$('wExample').onclick = () => { $('welcome').hidden = true; newProject(fingerDemo(), 'Dito con elastici'); };
+$('wExample2').onclick = () => { $('welcome').hidden = true; newProject(fingerBeltDemo(), 'Dito a cinghia'); };
 $('wEmpty').onclick = () => { $('welcome').hidden = true; setTool('beam'); };
 const slug = (s) => s.toLowerCase().normalize('NFD').replace(/[^\w]+/g, '-').replace(/^-|-$/g, '') || 'robotbuilder';
 
@@ -1033,7 +1069,7 @@ function frame(now) {
         if (!pts?.length) continue;
         const T = tensions[s.id] ?? 0;
         const motorized = s.anchors.some((a) => a.t === 'winch');
-        if (!motorized && s.id !== S.selected) continue;
+        if (!motorized && s.kind !== 'elastic' && s.id !== S.selected) continue;
         const mid = pts[Math.floor(pts.length / 2)];
         labels.push({ text: T < 0.005 ? 'lasco' : `${fmt(T, 2)} N`, pos: [mid[0], mid[1] - 4, mid[2]], cls: T < 0.005 ? 'slack' : T >= (s.fmaxRef ?? 10) * 0.98 ? 'warn' : '' });
       }
