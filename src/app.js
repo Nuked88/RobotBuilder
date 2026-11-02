@@ -1024,6 +1024,8 @@ function frame(now) {
         const pts = line?.userData.pts;
         if (!pts?.length) continue;
         const T = tensions[s.id] ?? 0;
+        const motorized = s.anchors.some((a) => a.t === 'winch');
+        if (!motorized && s.id !== S.selected) continue;
         const mid = pts[Math.floor(pts.length / 2)];
         labels.push({ text: T < 0.005 ? 'lasco' : `${fmt(T, 2)} N`, pos: [mid[0], mid[1] - 4, mid[2]], cls: T < 0.005 ? 'slack' : T >= (s.fmaxRef ?? 10) * 0.98 ? 'warn' : '' });
       }
