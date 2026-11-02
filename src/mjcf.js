@@ -1,5 +1,5 @@
 // Turns the editor document into a MuJoCo MJCF model.
-import { P, BEAM_W, LAYER, layerY, rad, holePos, pinMembers, mountOf } from './model.js';
+import { P, BEAM_W, LAYER, layerY, rad, holePos, guidePos, pinMembers, mountOf } from './model.js';
 
 const m = (mm) => +(mm / 1000).toFixed(6); // mm -> m
 const f = (...v) => v.map((x) => (+x.toFixed(6)).toString()).join(' ');
@@ -135,6 +135,12 @@ export function buildMJCF(doc, opts = {}) {
         if (!part) return;
         const h = holePos(part, a.i);
         items.push({ kind: 'site', name: addSite(part.id, { x: h.x, y: layerY(part.layer), z: h.z }) });
+      } else if (a.t === 'guide') {
+        // an eyelet on the side of a beam: the string runs through it freely
+        const part = partById.get(a.part);
+        if (!part) return;
+        const g = guidePos(part, a.i, a.side);
+        items.push({ kind: 'site', name: addSite(part.id, { x: g.x, y: layerY(part.layer), z: g.z }) });
       } else if (a.t === 'board') {
         items.push({ kind: 'site', name: addSite(G, { x: a.x, y: layerY(0) - BEAM_W / 2, z: a.z }) });
       } else if (a.t === 'winch') {

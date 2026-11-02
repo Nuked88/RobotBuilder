@@ -23,6 +23,8 @@ function fingerBase() {
   f.j2 = pulley(0, 144, 5);
   f.hole = (p, i) => ({ t: 'hole', part: p.id, i });
   f.over = (p, sx) => ({ t: 'pulley', id: p.id, sx, sz: 0 });
+  // eyelet on the side of a beam; on these upright beams side -1 is towards +x (right), +1 towards -x
+  f.guide = (p, i, side) => ({ t: 'guide', part: p.id, i, side });
   return f;
 }
 
@@ -46,12 +48,13 @@ export function fingerDemo() {
 // and pairs of crossed strings couple each joint to the one before, so all three bend together
 // and the whole motor force goes into the grip.
 export function fingerBeltDemo() {
-  const { d, palm, ph1, ph2, ph3, j0, j1, j2, hole, over } = fingerBase();
+  const { d, palm, ph1, ph2, ph3, j0, j1, j2, hole, over, guide } = fingerBase();
   const winch = { id: d.nextId++, x: 32, z: 48, layer: 1, r: 8, fmax: 8 };
   d.winches.push(winch);
   const w = { t: 'winch', id: winch.id };
-  d.strings.push({ id: d.nextId++, kind: 'string', name: 'Flessore', wind: 1, anchors: [w, hole(palm, 5), over(j0, 1), hole(ph1, 2)] });
-  d.strings.push({ id: d.nextId++, kind: 'string', name: 'Estensore', wind: -1, anchors: [w, hole(palm, 3), over(j0, -1), hole(ph1, 2)] });
+  // both run in the eyelets along the sides of the palm, so they stay in place
+  d.strings.push({ id: d.nextId++, kind: 'string', name: 'Flessore', wind: 1, anchors: [w, guide(palm, 3, -1), guide(palm, 5, -1), over(j0, 1), hole(ph1, 2)] });
+  d.strings.push({ id: d.nextId++, kind: 'string', name: 'Estensore', wind: -1, anchors: [w, guide(palm, 2, 1), guide(palm, 5, 1), over(j0, -1), hole(ph1, 2)] });
   // crossed pairs: when a joint turns, one strand of the pair would have to stretch unless the next joint turns too
   const cross = (name, a, pa, mid, pb, b) => {
     // a stiff cord (3000 N/m) rather than an ideal one: crossing between layers the geometry is not

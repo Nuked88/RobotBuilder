@@ -6,7 +6,7 @@ import { fingerDemo, fingerBeltDemo } from './demo.js';
 import { openStore, lastProjectId, setLastProjectId, saveFile } from './storage.js';
 import {
   P, BEAM_W, LAYER, layerY, rad, emptyDoc, holePos, holeIndexAt, onGrid, snapGrid, topLayerAt, layerBehind, holeAt,
-  pinAt, pinMembers, findById, prune, BEAM_COLORS, PIN_LABEL, STRING_LABEL, BOARD, EPS,
+  pinAt, pinMembers, findById, prune, BEAM_COLORS, PIN_LABEL, STRING_LABEL, BOARD, EPS, guidePos, anchorPos,
 } from './model.js';
 
 const $ = (id) => document.getElementById(id);
@@ -323,6 +323,21 @@ function hoverTarget(sx, sy, opts = {}) {
       if (d < 13 && (!best || d < best.d - 3 || (Math.abs(d - best.d) <= 3 && part.layer > best.layer))) best = { t: 'hole', part, i, x: h.x, z: h.z, layer: part.layer, d };
     }
   }
+  // cable guides on the beam sides: they win when the cursor is closer to them than to the hole
+  if (opts.guides) {
+    let g = null;
+    for (const part of doc.parts) {
+      for (let i = 0; i < part.holes; i++) {
+        for (const side of [1, -1]) {
+          const q = guidePos(part, i, side);
+          const s = view.project({ x: q.x, y: layerY(part.layer) - BEAM_W / 2, z: q.z });
+          const d = Math.hypot(sx - s.x, sy - s.y);
+          if (d < 9 && (!g || d < g.d - 2 || (Math.abs(d - g.d) <= 2 && part.layer > g.layer))) g = { t: 'guide', part, i, side, x: q.x, z: q.z, layer: part.layer, d };
+        }
+      }
+    }
+    if (g && (!best || g.d < best.d)) best = g;
+  }
   // a wheel wins unless the cursor sits right on a hole
   if (wheel && !(best && best.d < 5 && best.d < wheel.d)) return wheel;
   if (best) return best;
@@ -400,7 +415,7 @@ function updateGhost(sx, sy) {
       }
     }
   } else if (tool === 'string') {
-    const h = hoverTarget(sx, sy, { wheels: true });
+    const h = hoverTarget(sx, sy, { wheels: true, guides: true });
     S.hover = h;
     const pts = [];
     if (S.stringDraft) for (const a of S.stringDraft.anchors) pts.push(anchorPoint(a));
@@ -412,7 +427,8 @@ function updateGhost(sx, sy) {
         if (h.t === 'pulley' || h.t === 'winch') {
           const w = (h.t === 'pulley' ? S.doc.pulleys : S.doc.winches).find((e) => e.id === h.id);
           ring(w.x, layerY(w.layer) - BEAM_W / 2, w.z, (w.r + 1.5) / HOLE());
-        } else ring(h.x, layerY(h.layer) - BEAM_W / 2 - 0.4, h.z);
+        } else if (h.t === 'guide') ring(h.x, layerY(h.layer) - BEAM_W / 2 - 0.4, h.z, 0.6);
+        else ring(h.x, layerY(h.layer) - BEAM_W / 2 - 0.4, h.z);
       }
     }
     if (pts.length >= 2) {
@@ -458,6 +474,7 @@ function beamEndFor(sx, sy) {
 function anchorPoint(a) {
   const doc = S.doc;
   if (a.t === 'hole') { const p = doc.parts.find((e) => e.id === a.part); const h = holePos(p, a.i); return { x: h.x, y: layerY(p.layer), z: h.z }; }
+  if (a.t === 'guide') return anchorPos(doc, a);
   if (a.t === 'board') return { x: a.x, y: -BEAM_W / 2, z: a.z };
   if (a.t === 'pulley') { const p = doc.pulleys.find((e) => e.id === a.id); return { x: p.x + a.sx * p.r, y: layerY(p.layer), z: p.z + a.sz * p.r }; }
   if (a.t === 'winch') { const w = doc.winches.find((e) => e.id === a.id); return { x: w.x, y: layerY(w.layer), z: w.z }; }
@@ -466,6 +483,7 @@ function anchorPoint(a) {
 function targetToAnchor(h) {
   if (!h) return null;
   if (h.t === 'hole') return { t: 'hole', part: h.part.id, i: h.i };
+  if (h.t === 'guide') return { t: 'guide', part: h.part.id, i: h.i, side: h.side };
   if (h.t === 'board') return { t: 'board', x: h.x, z: h.z };
   if (h.t === 'pulley') return { t: 'pulley', id: h.id, sx: h.sx, sz: h.sz };
   if (h.t === 'winch') return { t: 'winch', id: h.id };
@@ -564,7 +582,7 @@ function clickString(dbl) {
   updateHint();
 }
 function sameAnchor(a, b) {
-  return a && b && a.t === b.t && (a.t === 'hole' ? a.part === b.part && a.i === b.i : a.t === 'board' ? a.x === b.x && a.z === b.z : a.id === b.id);
+  return a && b && a.t === b.t && (a.t === 'hole' ? a.part === b.part && a.i === b.i : a.t === 'guide' ? a.part === b.part && a.i === b.i && a.side === b.side : a.t === 'board' ? a.x === b.x && a.z === b.z : a.id === b.id);
 }
 function finishString() {
   const d = S.stringDraft;

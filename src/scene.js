@@ -5,7 +5,8 @@ import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer
 import { Line2 } from 'three/addons/lines/Line2.js';
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
-import { P, BEAM_W, HOLE_R, BOARD, LAYER, layerY, rad, holePos, pinMembers, mountOf, anchorPos, BEAM_COLORS } from './model.js';
+import { P, BEAM_W, HOLE_R, BOARD, LAYER, layerY, rad, holePos, pinMembers, mountOf, anchorPos, BEAM_COLORS, GUIDE_R, GUIDE_OFF } from './model.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
 const ROT = (a) => -rad(a); // beam angle -> rotation about +Y
 
@@ -210,6 +211,24 @@ export class View {
     return g;
   }
 
+  // Cable guides: a small eyelet on each side of the beam next to every hole, ring axis along the
+  // beam, so a string can run along the beam and be kept in place.
+  guideGeometry(n) {
+    this.guideGeo ||= new Map();
+    if (this.guideGeo.has(n)) return this.guideGeo.get(n);
+    const parts = [];
+    for (let i = 0; i < n; i++) for (const side of [1, -1]) {
+      const t = new THREE.TorusGeometry(GUIDE_R, 0.42, 8, 16);
+      t.rotateY(Math.PI / 2);
+      t.translate(i * P, 0, side * GUIDE_OFF);
+      parts.push(t);
+    }
+    const g = mergeGeometries(parts);
+    parts.forEach((t) => t.dispose());
+    this.guideGeo.set(n, g);
+    return g;
+  }
+
   // ---------------------------------------------------------------- document
   rebuild(doc) {
     this.doc = doc;
@@ -222,6 +241,10 @@ export class View {
       mesh.castShadow = true; mesh.receiveShadow = true;
       mesh.userData = { id: p.id, kind: 'part' };
       g.add(mesh);
+      const guides = new THREE.Mesh(this.guideGeometry(p.holes), mat);
+      guides.castShadow = true;
+      guides.userData = { id: p.id, kind: 'part' };
+      g.add(guides);
       this.placeBeam(g, p);
       this.world.add(g);
       this.objects.set(p.id, { group: g, kind: 'part', mesh, mat, home: g });
