@@ -99,6 +99,16 @@ button.primary { background: var(--accent); color: var(--accent-ink); border-col
 .navcube { position: absolute; right: 8px; top: 8px; display: grid; justify-items: center; gap: 4px; }
 .navcube .viewcube { display: block; width: 112px; height: 112px; }
 .navbtns { display: flex; gap: 6px; align-items: center; }
+.navbtns { flex-wrap: wrap; justify-content: center; max-width: 200px; }
+.chip[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.legend { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.legend li { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 5px 6px; border-radius: 6px; cursor: pointer; }
+.legend li:hover, .legend li.sel { background: var(--raised); }
+.legend .sw { width: 18px; height: 4px; border-radius: 2px; }
+.legend .sw.el { height: 8px; background-image: repeating-linear-gradient(90deg, transparent 0 2px, var(--surface) 2px 4px) !important; }
+.legend .ln { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.legend .ln small { color: var(--muted); font-size: 11px; }
+.legend .lt { font: 12px var(--font-num); font-variant-numeric: tabular-nums; color: var(--muted); }
 .navbtns .icon { border-radius: 999px; background: var(--surface); }
 .navbtns svg { width: 16px; height: 16px; }
 .chip { display: inline-flex; align-items: center; gap: 6px; background: var(--surface); border: 1px solid var(--line); border-radius: 999px; padding: 5px 11px; font-size: 12.5px; cursor: pointer; }

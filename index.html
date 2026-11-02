@@ -54,6 +54,7 @@
     <div class="navcube" id="navcube">
       <div class="navbtns">
         <button id="btnFront" class="icon" title="Vista frontale, centrata sul modello" aria-label="Vista frontale"><svg viewBox="0 0 24 24"><path d="M4 11 12 4l8 7"/><path d="M6 10v9h12v-9"/></svg></button>
+        <button id="btnSchema" class="chip" title="Pezzi in trasparenza e fili in evidenza, ognuno col suo colore (S)" aria-pressed="false">Vista schema</button>
         <button id="btnProj" class="chip" title="Passa tra vista in prospettiva e ortogonale (senza prospettiva, tutto in asse)">Prospettiva</button>
       </div>
     </div>
@@ -88,6 +89,10 @@
     <section>
       <h2>Comandi</h2>
       <div id="controls" class="controls"></div>
+    </section>
+    <section id="legendSec" hidden>
+      <h2>Fili</h2>
+      <ul id="legend" class="legend"></ul>
     </section>
     <section>
       <h2 id="inspTitle">Selezione</h2>

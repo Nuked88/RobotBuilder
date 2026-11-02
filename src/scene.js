@@ -40,7 +40,7 @@ export class View {
     const hemi = new THREE.HemisphereLight(0xffffff, 0x9aa0a8, 1.9);
     hemi.position.set(0, -1, 1.2);
     scene.add(hemi);
-    const sun = new THREE.DirectionalLight(0xffffff, 1.6);
+    const sun = (this.sun = new THREE.DirectionalLight(0xffffff, 1.6));
     sun.position.set(-150, -260, 380);
     sun.castShadow = true;
     sun.shadow.mapSize.set(2048, 2048);
@@ -229,7 +229,36 @@ export class View {
     for (const pin of doc.pins) this.objects.set(pin.id, { kind: 'pin', ...this.makePin(pin) });
     for (const pul of doc.pulleys) this.objects.set(pul.id, { kind: 'pulley', ...this.makeWheel(pul, 'pulley') });
     for (const w of doc.winches) this.objects.set(w.id, { kind: 'winch', ...this.makeWheel(w, 'winch') });
+    this.applySchema();
     this.syncStrings(null);
+  }
+
+  // Schematic view: parts become ghosts, pulleys just their rim, strings thick and on top of everything,
+  // each in its own colour, so what is connected to what reads at a glance.
+  setSchema(on) {
+    this.schema = on;
+    this.sun.castShadow = !on;
+    this.applySchema();
+    for (const l of this.stringLines.values()) { l.material.depthTest = !on; l.material.needsUpdate = true; l.userData.xray.visible = !on; }
+  }
+
+  applySchema() {
+    const on = !!this.schema;
+    for (const o of this.objects.values()) {
+      o.group.traverse((m) => {
+        if (!m.isMesh) return;
+        const mat = m.material;
+        if (m.userData.base === undefined) m.userData.base = { transparent: mat.transparent, opacity: mat.opacity, depthWrite: mat.depthWrite, cast: m.castShadow };
+        const b = m.userData.base;
+        if (o.kind === 'pin') return;
+        if (o.kind === 'pulley' && !m.userData.keep) { m.visible = !on; return; }
+        mat.transparent = on ? true : b.transparent;
+        mat.opacity = on ? (o.kind === 'part' ? 0.3 : 0.35) : b.opacity;
+        mat.depthWrite = on ? false : b.depthWrite;
+        m.castShadow = on ? false : b.cast;
+        mat.needsUpdate = true;
+      });
+    }
   }
 
   placeBeam(g, p) {
@@ -290,13 +319,19 @@ export class View {
     const r = item.r;
     const w = BEAM_W - 0.8;
     if (kind === 'pulley') {
-      const mat = new THREE.MeshStandardMaterial({ color: 0xeeeeee, roughness: 0.35 });
+      // see-through, so the strings wrapped round it stay visible; a solid rim keeps its shape readable
+      const mat = new THREE.MeshStandardMaterial({ color: 0xeeeeee, roughness: 0.35, transparent: true, opacity: 0.5, depthWrite: false });
       const core = new THREE.Mesh(new THREE.CylinderGeometry(r, r, w * 0.5, 32), mat);
+      const rim = new THREE.Mesh(new THREE.TorusGeometry(r + 1.2, 0.45, 8, 40), new THREE.MeshStandardMaterial({ color: 0x8d949e, roughness: 0.5 }));
+      rim.rotation.x = Math.PI / 2;
+      rim.userData.keep = true;
+      g.add(rim);
       const fl1 = new THREE.Mesh(new THREE.CylinderGeometry(r + 1.2, r + 1.2, w * 0.25, 32), mat);
       const fl2 = fl1.clone();
       fl1.position.y = w * 0.375; fl2.position.y = -w * 0.375;
       const axle = new THREE.Mesh(new THREE.CylinderGeometry(HOLE_R * 0.9, HOLE_R * 0.9, w + LAYER, 16), new THREE.MeshStandardMaterial({ color: 0x6d737c }));
       axle.position.y = LAYER / 2;
+      core.castShadow = false;
       g.add(core, fl1, fl2, axle);
       g.userData.mat = mat;
     } else {
@@ -332,7 +367,7 @@ export class View {
         line.userData = { id: s.id, kind: 'string' };
         line.renderOrder = 3;
         // the same string drawn faintly through beams and pulleys, so its whole route stays readable
-        const xmat = new LineMaterial({ linewidth: 2, worldUnits: false, dashed: false, dashSize: 3, gapSize: 2.5, transparent: true, opacity: 0.38, depthTest: false, depthWrite: false });
+        const xmat = new LineMaterial({ linewidth: 2, worldUnits: false, dashed: false, dashSize: 3, gapSize: 2.5, transparent: true, opacity: 0.55, depthTest: false, depthWrite: false });
         xmat.resolution.set(this.size.w, this.size.h);
         const xray = new Line2(line.geometry, xmat);
         xray.renderOrder = 2;
@@ -351,12 +386,14 @@ export class View {
       line.geometry.setPositions(flat);
       line.computeLineDistances();
       const T = tensions[s.id];
-      const style = stringStyle(s, T, sim, this.dark);
+      const style = stringStyle(s, T, sim, stringColor(doc, s), this.schema);
       for (const l of [line, xray]) {
         l.material.color.set(style.color);
         if (l.material.dashed !== style.dashed) { l.material.dashed = style.dashed; l.material.needsUpdate = true; }
       }
-      line.material.linewidth = this.selectedId === s.id ? 5 : style.width;
+      line.material.linewidth = this.selectedId === s.id || this.hoverString === s.id ? style.width + 2.5 : style.width;
+      line.material.depthTest = !this.schema;
+      xray.visible = !this.schema;
       xray.material.linewidth = Math.max(1.5, style.width * 0.6);
       line.userData.pts = pts;
       this.updateMarks(s, line, pts, style.color, T, sim);
@@ -560,14 +597,20 @@ function segDist(px, py, a, b) {
   return Math.hypot(px - (a.x + t * dx), py - (a.y + t * dy));
 }
 
-export function stringStyle(s, T, sim, dark) {
-  if (T === undefined || sim === null) return { color: s.kind === 'elastic' ? '#2fae6b' : dark ? '#f4f1e8' : '#1d2127', dashed: false, width: s.kind === 'elastic' ? 4 : 3.2 };
-  if (T < 0.005) return { color: '#8b919b', dashed: true, width: 2.6 };
+export const STRING_COLORS = ['#e8590c', '#1c7ed6', '#2f9e44', '#c2255c', '#7048e8', '#0c8599', '#e67700', '#5c940d', '#d6336c', '#3b5bdb'];
+export const stringColor = (doc, s) => STRING_COLORS[Math.max(0, doc.strings.indexOf(s)) % STRING_COLORS.length];
+
+// Colour and width of a string: its own colour while building and in the schematic view,
+// a cool-to-warm tension scale in the normal simulation view.
+export function stringStyle(s, T, sim, identity, schema) {
+  const base = s.kind === 'elastic' ? 3 : 3.4;
+  if (T === undefined || sim === null) return { color: identity, dashed: false, width: schema ? base + 1.2 : base };
   const ref = s.fmaxRef || 10;
   const x = Math.min(1, T / ref);
-  // cool -> warm as tension grows
+  if (T < 0.005) return { color: schema ? identity : '#8b919b', dashed: true, width: 2.6 };
+  if (schema) return { color: identity, dashed: false, width: base + 1 + 3 * x };
   const c = new THREE.Color().setHSL(0.58 - 0.58 * x, 0.85, 0.55);
-  return { color: '#' + c.getHexString(), dashed: false, width: s.kind === 'elastic' ? 4 : 3.2 };
+  return { color: '#' + c.getHexString(), dashed: false, width: base };
 }
 
 export { THREE };

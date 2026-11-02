@@ -1,5 +1,5 @@
 import './style.css';
-import { View, THREE } from './scene.js';
+import { View, THREE, stringColor } from './scene.js';
 import { ViewCube } from './viewcube.js';
 import { initPhysics, Sim } from './physics.js';
 import { fingerDemo, fingerBeltDemo } from './demo.js';
@@ -705,6 +705,7 @@ function select(id) {
   S.selected = id;
   if (id !== null) view.setHighlight(id, true, 0x3a6fd8);
   drawStrings();
+  renderLegend();
   renderInspector();
 }
 
@@ -723,13 +724,40 @@ window.addEventListener('keydown', (e) => {
   }
   if (k === 'enter' && S.stringDraft) { finishString(); return; }
   if (k === ' ') { e.preventDefault(); startSim(); return; }
+  if (k === 's') { toggleSchema(); return; }
   if ((k === 'delete' || k === 'backspace') && S.selected !== null && S.mode === 'edit') { pushUndo(); removeObject(S.selected); S.selected = null; commit(); return; }
   const map = { v: 'select', b: 'beam', p: 'pin', u: 'pulley', f: 'string', w: 'winch', x: 'erase' };
   if (map[k]) setTool(map[k]);
 });
 
 // ------------------------------------------------------------------ side panel
-function renderPanel() { renderControls(); renderInspector(); renderWarnings(); }
+function renderPanel() { renderControls(); renderLegend(); renderInspector(); renderWarnings(); }
+
+function stringName(s) {
+  if (s.name) return s.name;
+  const same = S.doc.strings.filter((x) => x.kind === s.kind);
+  return `${s.kind === 'elastic' ? 'Elastico' : 'Filo'} ${same.indexOf(s) + 1}`;
+}
+
+// One row per string: its colour in the schematic view, name, what drives it and, while simulating, its tension.
+function renderLegend() {
+  const ul = $('legend');
+  $('legendSec').hidden = !S.doc.strings.length;
+  ul.innerHTML = '';
+  for (const s of S.doc.strings) {
+    const li = document.createElement('li');
+    li.dataset.sid = s.id;
+    li.className = S.selected === s.id ? 'sel' : '';
+    const onW = s.anchors[0]?.t === 'winch' || s.anchors[s.anchors.length - 1]?.t === 'winch';
+    const what = s.kind === 'elastic' ? 'elastico' : onW ? (s.wind === -1 ? 'si svolge dal verricello' : 'si avvolge sul verricello') : s.stiffness ? 'cavo' : 'filo fisso';
+    li.innerHTML = `<span class="sw${s.kind === 'elastic' ? ' el' : ''}" style="background:${stringColor(S.doc, s)}"></span><span class="ln"></span><span class="lt" data-t></span>`;
+    li.querySelector('.ln').innerHTML = `${escapeHtml(stringName(s))} <small>${what}</small>`;
+    li.onmouseenter = () => { view.hoverString = s.id; drawStrings(); };
+    li.onmouseleave = () => { view.hoverString = null; drawStrings(); };
+    li.onclick = () => { if (S.tool !== 'select' && S.mode === 'edit') setTool('select'); select(s.id); renderLegend(); };
+    ul.appendChild(li);
+  }
+}
 
 // Strings tied to a winch: [{s, wind}] where wind is +1 (winds on, pulls) or -1 (unwinds, pays out).
 function winchStrings(w) {
@@ -800,6 +828,7 @@ function renderControls() {
 function updateLiveReadouts() {
   const sim = S.sim;
   if (!sim) return;
+  for (const li of $('legend').querySelectorAll('li')) li.querySelector('[data-t]').textContent = fmt(sim.tension(+li.dataset.sid), 2) + ' N';
   for (const box of $('controls').querySelectorAll('.ctl')) {
     let note = '';
     if (box.dataset.winch) {
@@ -991,6 +1020,13 @@ $('btnStop').onclick = stopSim;
 $('btnPause').onclick = () => { S.paused = !S.paused; syncRunUI(); };
 $('selSpeed').onchange = (e) => (S.speed = +e.target.value);
 $('btnFront').onclick = () => view.frontView();
+function toggleSchema() {
+  const on = !view.schema;
+  view.setSchema(on);
+  $('btnSchema').setAttribute('aria-pressed', String(on));
+  drawStrings();
+}
+$('btnSchema').onclick = toggleSchema;
 $('btnProj').onclick = () => {
   const ortho = view.camera !== view.ortho;
   view.setOrthographic(ortho);
