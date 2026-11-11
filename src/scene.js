@@ -11,6 +11,7 @@ import {
 } from './model.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
+const shown = (o) => { for (; o; o = o.parent) if (!o.visible) return false; return true; };
 const setQuat = (o, q) => o.quaternion.set(q[1], q[2], q[3], q[0]); // [w, x, y, z] -> three
 
 export class View {
@@ -379,7 +380,14 @@ export class View {
     for (const pul of doc.pulleys) this.objects.set(pul.id, { kind: 'pulley', ...this.makeWheel(pul, 'pulley') });
     for (const w of doc.winches) this.objects.set(w.id, { kind: 'winch', ...this.makeWheel(w, 'winch') });
     this.applySchema();
+    if (this.hidden) this.setHidden(this.hidden);
     this.syncStrings(null);
+  }
+
+  // Hide pieces from view (and from the mouse) without touching the design.
+  setHidden(ids) {
+    this.hidden = ids;
+    for (const [id, o] of this.objects) o.group.visible = !ids.has(id);
   }
 
   // Schematic view: parts become ghosts, pulleys just their rim, strings thick and on top of everything,
@@ -781,7 +789,7 @@ export class View {
   // First solid thing under the cursor (a piece, the wall or the baseplate), with the face normal.
   pickSurface(sx, sy) {
     const rc = this.ray(sx, sy);
-    const hits = rc.intersectObjects([this.world, ...this.surfaces], true).filter((h) => h.object.isMesh && h.face && (h.object.userData.id !== undefined || h.object.userData.surface));
+    const hits = rc.intersectObjects([this.world, ...this.surfaces], true).filter((h) => h.object.isMesh && h.face && (h.object.userData.id !== undefined || h.object.userData.surface) && shown(h.object));
     const h = hits[0];
     if (!h) return { ray: rc.ray, distance: Infinity };
     const normal = h.face.normal.clone().transformDirection(h.object.matrixWorld);
@@ -790,7 +798,7 @@ export class View {
 
   pickObject(sx, sy) {
     const rc = this.ray(sx, sy);
-    const hits = rc.intersectObjects([this.world], true).filter((h) => h.object.userData?.id !== undefined);
+    const hits = rc.intersectObjects([this.world], true).filter((h) => h.object.userData?.id !== undefined && shown(h.object));
     // strings: screen distance to segments
     let best = null;
     for (const [id, line] of this.stringLines) {

@@ -20,6 +20,23 @@ Si costruisce come coi mattoncini: clicchi una faccia e il pezzo ci si appoggia 
 
 Spazio avvia/mette in pausa la simulazione, Ctrl+Z annulla, tasto destro ruota la vista. I fili si colorano in base alla tensione e un filo lasco viene segnalato.
 
+### Strumenti da CAD, resi facili
+
+Idee prese dai CAD veri (SolidWorks e simili), ridotte a un clic.
+
+- **Selezione multipla**: Shift+clic aggiunge o toglie un pezzo, doppio clic prende tutto ciò che è attaccato, Ctrl+A tutto. Trascini un pezzo e si muove l'intera selezione.
+- **Frecce colorate** sul pezzo scelto: tirane una e il pezzo scorre solo lungo quell'asse, a scatti di un foro.
+- **Piastrine** sulle facce di un blocco: tirale per allungarlo o accorciarlo, senza toccare i numeri.
+- **Ripeti**: N copie in fila a destra, in alto o verso di te, con il passo in fori. Vengono copiati anche perni, pulegge, verricelli e fili.
+- **Specchia**: la copia speculare (mano destra e mano sinistra), con i servo che girano al contrario.
+- **Duplica** (Ctrl+D) e **Nascondi** (H, Shift+H mostra tutto) per lavorare dentro un modello affollato.
+- **Metro** (T): due clic e leggi la distanza in millimetri e in fori.
+- **Baricentro**: il punto giallo e il peso totale, per capire se il robot si ribalta.
+- **Distinta pezzi**: quanti pezzi di ogni tipo servono e quanto filo, scaricabile in CSV. Un clic su una riga seleziona quei pezzi.
+- **Controllo interferenze**: un avviso se due pezzi occupano lo stesso spazio; cliccalo e li evidenzia.
+- **Sequenza di pose**: salva due o più posizioni degli slider e il robot le ripete in ciclo.
+- **STL**: File, Scarica STL, per stampare in 3D travi e blocchi.
+
 ### Regole del gioco
 
 - **I blocchi si incollano** a quello che toccano: altri blocchi, il muro, il pavimento, il corpo di un servo. Una spunta sul blocco toglie la colla, per i pezzi che devono muoversi accanto ad altri.

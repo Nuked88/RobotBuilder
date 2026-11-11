@@ -5,6 +5,8 @@ import { initPhysics, Sim } from './physics.js';
 import { fingerDemo, fingerBeltDemo, armDemo } from './demo.js';
 import { openStore, lastProjectId, setLastProjectId, saveFile } from './storage.js';
 import { servoParams } from './mjcf.js';
+import { STLExporter } from 'three/addons/exporters/STLExporter.js';
+import { withDependents, boundsOf, cloneItems, xfShift, xfMirrorX, bom, bomCsv, interferences } from './ops.js';
 import {
   P, BEAM_W, LAYER, rad, emptyDoc, holePos, holeAt, layerBehind, pinAt, pinMembers, findById, prune, BEAM_COLORS, BLOCK_COLORS, PIN_LABEL,
   STRING_LABEL, BOARD, FLOOR, EPS, guidePos, anchorPos, mountOf, fam, NVEC, toWorld, toFam, famQuat, isBeam, isBlock, isServo, holeWorld,
@@ -33,7 +35,12 @@ const S = {
   blockDraft: null,    // block being stretched: {a, b, normal}
   stringDraft: null,   // {kind, anchors}
   hover: null,
-  selected: null,      // id
+  selected: null,      // id of the piece shown in the panel
+  multi: [],           // ids when more than one piece is selected
+  hidden: new Set(),   // pieces hidden from view (not saved)
+  measure: null,       // tape measure: {a, b}
+  showCom: false,
+  seq: null,           // pose sequence being played: {i, t}
   mode: 'edit',        // 'edit' | 'run'
   paused: false,
   speed: 1,
@@ -51,7 +58,8 @@ let store = null;
 
 // ------------------------------------------------------------------ hint strip
 const HINTS = {
-  select: '<b>Trascina</b> un pezzo per spostarlo (con <b>Shift</b> sposti tutto quello che gli è attaccato). <b>Frecce</b> e <b>Pag↑/Pag↓</b> lo spostano di un foro, <b>R</b> lo ruota, <b>Ctrl+D</b> lo duplica. In simulazione trascinando spingi i pezzi.',
+  select: '<b>Clicca</b> un pezzo, <b>Shift+clic</b> ne aggiunge altri, <b>doppio clic</b> prende tutto il gruppo. Tira le <b>frecce colorate</b> per spostare, le <b>piastrine</b> di un blocco per allungarlo. <b>R</b> ruota, <b>Ctrl+D</b> duplica, <b>H</b> nasconde.',
+  measure: 'Clicca due punti per misurare la distanza: si aggancia ai fori. <b>Esc</b> toglie la misura.',
   block: '<b>Clicca una faccia</b> (pavimento, muro o un altro pezzo) per appoggiarci un blocco. <b>Trascina</b> per farne uno lungo o una piastra. <b>Clic destro</b> lo toglie. I blocchi che si toccano restano incollati.',
   block1: 'Rilascia per posare il blocco. <b>Esc</b> annulla.',
   beam0: 'Clicca un <b>foro</b> dove inizia la trave: del muro, del pavimento, di una trave o di un blocco. La trave si stende sul piano della faccia che clicchi.',
@@ -89,9 +97,13 @@ function snapshot() { return JSON.stringify(S.doc); }
 function pushUndo() { S.undo.push(snapshot()); if (S.undo.length > 150) S.undo.shift(); S.redo = []; }
 function commit() {
   prune(S.doc);
-  if (S.selected && !findById(S.doc, S.selected)) S.selected = null;
+  S.multi = S.multi.filter((id) => findById(S.doc, id));
+  if (S.multi.length < 2) { S.selected = S.multi[0] ?? S.selected; S.multi = []; }
+  if (S.selected !== null && !findById(S.doc, S.selected)) S.selected = S.multi[0] ?? null;
   view.rebuild(S.doc);
-  if (S.selected) view.setHighlight(S.selected, true);
+  applyHidden();
+  for (const id of selIds()) view.setHighlight(id, true, 0x3a6fd8);
+  updateGizmo();
   schedulePreview();
   renderPanel();
   markDirty();
@@ -150,7 +162,8 @@ async function loadProject(p) {
   S.controls = p.doc.controls || { winch: {}, servo: {} };
   delete S.doc.controls;
   S.undo = []; S.redo = [];
-  S.selected = null;
+  S.selected = null; S.multi = []; S.hidden.clear(); S.measure = null; S.seq = null;
+  drawMeasure(); applyHidden();
   cancelDrafts();
   view.rebuild(S.doc);
   resetView(false);
@@ -184,7 +197,8 @@ function newProject(doc = emptyDoc(), name = 'Progetto senza nome') {
   S.doc = migrate(doc);
   S.controls = { winch: {}, servo: {} };
   S.undo = []; S.redo = [];
-  S.selected = null;
+  S.selected = null; S.multi = []; S.hidden.clear(); S.measure = null; S.seq = null;
+  drawMeasure(); applyHidden();
   cancelDrafts();
   view.rebuild(S.doc);
   resetView(S.doc.parts.length > 0);
@@ -215,10 +229,14 @@ function runPreview() {
   } catch (e) {
     warnings = [{ level: 'error', text: 'Il modello non si compila: ' + String(e.message || e).replace(/^MuJoCo Error:\s*/, '').split('\n')[0] }];
   }
-  S.warnings = warnings;
+  S.warnings = [...warnings, ...interferences(S.doc)];
+  S.mass = S.preview ? S.preview.massProps().mass : 0;
   drawStrings();
   renderWarnings();
   renderControls();
+  renderModel();
+  renderSeq();
+  updateCom();
 }
 
 // strings that jumped to the other side of a pulley during the run make everything shake
@@ -268,9 +286,11 @@ function startSim() {
   renderWarnings();
   syncRunUI();
   renderPanel();
+  updateGizmo();
 }
 function stopSim() {
   if (S.mode !== 'run') return;
+  S.seq = null;
   S.sim?.dispose();
   S.sim = null;
   S.mode = 'edit';
@@ -366,6 +386,7 @@ function hoverTarget(sx, sy, opts = {}) {
     if (!best || d < best.d - 3 || (Math.abs(d - best.d) <= 3 && depth < best.depth)) best = { ...cand, d, depth };
   };
   for (const part of doc.parts) {
+    if (S.hidden.has(part.id)) continue;
     if (isBeam(part)) {
       const n = fam(part);
       if (!famOk(n)) continue;
@@ -600,6 +621,10 @@ function updateGhost(sx, sy) {
       l.renderOrder = 11;
       ghost.add(l);
     }
+  } else if (tool === 'measure') {
+    const q = measurePoint(sx, sy);
+    if (q?.h) ring(q.h, q.h.t === 'guide' ? 0.6 : 1);
+    if (S.measure && !S.measure.b) { drawMeasure(q?.p); if (S.measure.label) ghostLabels.push(S.measure.label); }
   } else if (tool === 'erase' || tool === 'select') {
     const hit = view.pickObject(sx, sy);
     setHover(hit?.id ?? null);
@@ -609,9 +634,9 @@ function updateGhost(sx, sy) {
 let hoverId = null;
 function setHover(id) {
   if (hoverId === id) return;
-  if (hoverId !== null && hoverId !== S.selected) view.setHighlight(hoverId, false);
+  if (hoverId !== null && !selIds().includes(hoverId)) view.setHighlight(hoverId, false);
   hoverId = id;
-  if (id !== null) view.setHighlight(id, true, S.tool === 'erase' ? 0xff3b30 : 0x888888);
+  if (id !== null && !selIds().includes(id)) view.setHighlight(id, true, S.tool === 'erase' ? 0xff3b30 : 0x888888);
 }
 
 function beamEndFor(sx, sy) {
@@ -813,7 +838,7 @@ function cancelDrafts() {
 }
 
 // ------------------------------------------------------------------ tools
-const TOOLS = ['select', 'block', 'beam', 'pin', 'servo', 'pulley', 'string', 'winch', 'erase'];
+const TOOLS = ['select', 'block', 'beam', 'pin', 'servo', 'pulley', 'string', 'winch', 'erase', 'measure'];
 function setTool(t, silent) {
   if (S.mode === 'run' && t !== 'select') return;
   if (S.tool === 'string' && S.stringDraft && t !== 'string') finishString();
@@ -826,6 +851,8 @@ function setTool(t, silent) {
   const vp = $('viewport');
   vp.className = 'viewport ' + (t === 'select' ? 'cursor-grab' : t === 'erase' ? 'cursor-erase' : 'cursor-cross');
   renderSubtools();
+  updateGizmo();
+  if (t !== 'measure' && S.measure) { S.measure = null; drawMeasure(); }
   if (!silent) updateHint();
 }
 
@@ -876,6 +903,8 @@ canvas.addEventListener('pointerdown', (e) => {
     if (c) { S.blockDraft = { a: c.c, b: c.c, normal: c.normal }; canvas.setPointerCapture(e.pointerId); updateHint(); updateGhost(e.offsetX, e.offsetY); }
     return;
   }
+  const giz = S.mode === 'edit' && S.tool === 'select' ? pickGizmo(e.offsetX, e.offsetY) : null;
+  if (giz) { startGizmo(giz); canvas.setPointerCapture(e.pointerId); return; }
   const hit = S.tool === 'select' ? view.pickObject(e.offsetX, e.offsetY) : null;
   if (S.mode === 'run' && hit && hit.kind === 'part' && hit.point) {
     const pose = S.sim.bodyPose(hit.id);
@@ -890,7 +919,7 @@ canvas.addEventListener('pointerdown', (e) => {
   }
   if (S.mode === 'edit' && hit && hit.kind === 'part' && hit.point) {
     startMove(hit.id, e.shiftKey, e.offsetX, e.offsetY);
-    canvas.setPointerCapture(e.pointerId);
+    if (S.move) canvas.setPointerCapture(e.pointerId);
     return;
   }
   // left drag on empty space orbits when nothing else wants it
@@ -928,59 +957,51 @@ function startMove(partId, group, sx, sy) {
   const part = S.doc.parts.find((p) => p.id === partId);
   const surf = view.pickSurface(sx, sy);
   if (!part || !surf.point) return;
-  const items = moveSet(partId, group);
+  // a piece of a multiple selection drags the whole selection
+  const inSel = S.multi.includes(partId);
+  const items = inSel ? moveItems(S.multi) : moveSet(partId, group);
   let normal = new THREE.Vector3(...NVEC[fam(part)]);
   if (!isBeam(part)) {
     const a = [Math.abs(surf.normal.x), Math.abs(surf.normal.y), Math.abs(surf.normal.z)];
     const k = a[0] > a[1] && a[0] > a[2] ? 0 : a[1] > a[2] ? 1 : 2;
     normal = new THREE.Vector3(k === 0 ? 1 : 0, k === 1 ? 1 : 0, k === 2 ? 1 : 0);
   }
-  S.move = { p0: surf.point.clone(), normal, items, orig: items.map(coordsOf), d: [0, 0, 0], undone: false, selectId: partId };
+  S.move = { p0: surf.point.clone(), normal, items, orig: items.map(coordsOf), d: [0, 0, 0], undone: false, selectId: partId, keep: inSel, shift: group };
 }
 function updateMove(sx, sy) {
   const m = S.move;
-  const p = view.planeThrough(sx, sy, m.normal, m.p0);
-  if (!p) return;
-  const d = [snapP(p.x - m.p0.x), snapP(p.y - m.p0.y), snapP(p.z - m.p0.z)];
+  let d;
+  if (m.axis) {
+    const t = snapP(axisParam(sx, sy, m.p0, m.axis));
+    d = [m.axis.x * t, m.axis.y * t, m.axis.z * t].map((v) => Math.round(v));
+  } else {
+    const p = view.planeThrough(sx, sy, m.normal, m.p0);
+    if (!p) return;
+    d = [snapP(p.x - m.p0.x), snapP(p.y - m.p0.y), snapP(p.z - m.p0.z)];
+  }
   if (d.every((v, k) => v === m.d[k])) return;
   if (!m.undone) { pushUndo(); m.undone = true; }
   m.d = d;
   m.items.forEach((o, k) => { restoreCoords(o, m.orig[k]); shiftItem(o, d); });
   view.rebuild(S.doc);
-  view.setHighlight(m.selectId, true, 0x3a6fd8);
+  for (const id of m.keep ? selIds() : [m.selectId]) view.setHighlight(id, true, 0x3a6fd8);
+  ghostLabels = [{ text: d.map((v, k) => (v ? `${'↔⤢↕'[k]} ${Math.abs(v) / P} fori` : '')).filter(Boolean).join('  ') || '0', pos: [m.p0.x + d[0], m.p0.y + d[1], m.p0.z + d[2] + 6], cls: 'ghost' }];
+  if (m.keep) updateGizmo();
   schedulePreview();
 }
 function endMove() {
   const m = S.move;
   S.move = null;
-  if (m.undone) { S.selected = m.selectId; commit(); }
-  else select(m.selectId);
+  ghostLabels = [];
+  if (m.undone) { if (!m.keep) { S.multi = []; S.selected = m.selectId; } commit(); }
+  else if (!m.axis) select(m.selectId, m.shift);
 }
 // Arrow keys: push the selected piece one hole along a world axis.
 function nudgeSelected(d) {
-  const f = S.selected !== null ? findById(S.doc, S.selected) : null;
-  if (!f || f.coll === 'strings') return;
+  const items = moveItems(selIds());
+  if (!items.length) return;
   pushUndo();
-  for (const o of f.coll === 'parts' ? moveSet(f.obj.id, false) : [f.obj]) shiftItem(o, d);
-  commit();
-}
-function duplicateSelected() {
-  const f = S.selected !== null ? findById(S.doc, S.selected) : null;
-  if (!f || f.coll !== 'parts') return;
-  const src = f.obj, box = isBeam(src) ? null : solidBox(src);
-  const span = (k) => (box ? Math.ceil((box.max[k] - box.min[k] - 0.5) / P) || 1 : 1) * P;
-  // next to the original: the first free place to the right, above, to the left, in front
-  let copy = null;
-  for (const d of [[span(0), 0, 0], [0, 0, span(2)], [-span(0), 0, 0], [0, -span(1), 0]]) {
-    const c = JSON.parse(JSON.stringify(src));
-    shiftItem(c, d);
-    if (!box || !blocked(c)) { copy = c; break; }
-  }
-  if (!copy) { toast('Non c\'è posto accanto per la copia.'); return; }
-  pushUndo();
-  copy.id = S.doc.nextId++;
-  S.doc.parts.push(copy);
-  S.selected = copy.id;
+  for (const o of items) shiftItem(o, d);
   commit();
 }
 // R: turn the selected piece. A beam turns 15 degrees about its first hole (pins and wheels used
@@ -1011,6 +1032,7 @@ function rotateSelected(deg) {
 }
 
 canvas.addEventListener('pointermove', (e) => {
+  if (S.resize) { updateResize(e.offsetX, e.offsetY); return; }
   if (S.move) { updateMove(e.offsetX, e.offsetY); return; }
   if (S.blockDraft) {
     const d = S.blockDraft;
@@ -1031,6 +1053,7 @@ canvas.addEventListener('pointermove', (e) => {
 
 canvas.addEventListener('pointerup', (e) => {
   if (S.drag) { S.drag = null; S.sim?.clearForces(); canvas.releasePointerCapture(e.pointerId); return; }
+  if (S.resize) { const r = S.resize; S.resize = null; ghostLabels = []; if (r.undone) commit(); canvas.releasePointerCapture(e.pointerId); down = null; return; }
   if (S.move) { endMove(); canvas.releasePointerCapture(e.pointerId); down = null; return; }
   if (S.blockDraft) { placeBlock(); canvas.releasePointerCapture(e.pointerId); down = null; updateGhost(e.offsetX, e.offsetY); return; }
   if (!down) return;
@@ -1045,12 +1068,17 @@ canvas.addEventListener('pointerup', (e) => {
     return;
   }
   if (b !== 0) return;
-  onClick(e.offsetX, e.offsetY, e.detail >= 2);
+  onClick(e.offsetX, e.offsetY, e.detail >= 2, e.shiftKey);
+});
+canvas.addEventListener('dblclick', (e) => {
+  if (S.mode !== 'edit' || S.tool !== 'select') return;
+  const hit = view.pickObject(e.offsetX, e.offsetY);
+  if (hit?.kind === 'part') selectMany(attachedTo(hit.id));
 });
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 canvas.addEventListener('pointerleave', () => { if (!S.draw && !S.stringDraft && !S.blockDraft) clearGhost(); setHover(null); });
 
-function onClick(sx, sy, dbl) {
+function onClick(sx, sy, dbl, shift) {
   if (S.mode === 'run') return;
   updateGhost(sx, sy);
   switch (S.tool) {
@@ -1061,22 +1089,14 @@ function onClick(sx, sy, dbl) {
     case 'winch': clickWheel('winch'); break;
     case 'string': clickString(dbl); break;
     case 'erase': eraseAt(sx, sy); break;
+    case 'measure': clickMeasure(sx, sy); break;
     case 'select': {
       const hit = view.pickObject(sx, sy);
-      select(hit ? hit.id : null);
+      select(hit ? hit.id : null, shift);
       break;
     }
   }
   updateGhost(sx, sy);
-}
-
-function select(id) {
-  if (S.selected !== null) view.setHighlight(S.selected, false);
-  S.selected = id;
-  if (id !== null) view.setHighlight(id, true, 0x3a6fd8);
-  drawStrings();
-  renderLegend();
-  renderInspector();
 }
 
 // ------------------------------------------------------------------ keyboard
@@ -1084,34 +1104,387 @@ let lastMouse = null;
 canvas.addEventListener('pointermove', (e) => { lastMouse = { x: e.offsetX, y: e.offsetY }; });
 const NUDGE = { arrowleft: [-P, 0, 0], arrowright: [P, 0, 0], arrowup: [0, 0, P], arrowdown: [0, 0, -P], pageup: [0, P, 0], pagedown: [0, -P, 0] };
 window.addEventListener('keydown', (e) => {
-  if (e.target.matches('input, select, textarea')) return;
+  if (e.target.matches('input:not([type=checkbox]), select, textarea')) return;
   const k = e.key.toLowerCase();
   if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
   if ((e.ctrlKey || e.metaKey) && k === 'y') { e.preventDefault(); redo(); return; }
   if ((e.ctrlKey || e.metaKey) && k === 'd' && S.mode === 'edit') { e.preventDefault(); duplicateSelected(); return; }
+  if ((e.ctrlKey || e.metaKey) && k === 'a' && S.mode === 'edit') { e.preventDefault(); setTool('select'); selectMany([...S.doc.parts, ...S.doc.pulleys, ...S.doc.winches].filter((o) => !S.hidden.has(o.id)).map((o) => o.id)); return; }
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (k === 'escape') {
     if (S.stringDraft) { S.stringDraft = null; clearGhost(); updateHint(); }
     else if (S.draw || S.blockDraft) { S.draw = null; S.blockDraft = null; clearGhost(); updateHint(); }
+    else if (S.measure) { S.measure = null; drawMeasure(); clearGhost(); }
     else select(null);
     return;
   }
   if (k === 'enter' && S.stringDraft) { finishString(); return; }
   if (k === ' ') { e.preventDefault(); startSim(); return; }
   if (k === 's') { toggleSchema(); return; }
-  if ((k === 'delete' || k === 'backspace') && S.selected !== null && S.mode === 'edit') { pushUndo(); removeObject(S.selected); S.selected = null; commit(); return; }
+  if ((k === 'delete' || k === 'backspace') && S.mode === 'edit') { deleteSelection(); return; }
+  if (k === 'h' && S.mode === 'edit') { if (e.shiftKey) { S.hidden.clear(); applyHidden(); } else hideSelection(); return; }
   if (NUDGE[k] && S.mode === 'edit' && S.selected !== null) { e.preventDefault(); nudgeSelected(NUDGE[k]); return; }
   if (k === 'r' && S.mode === 'edit') {
     if (S.tool === 'servo') { S.servoAngle = (S.servoAngle + (e.shiftKey ? 270 : 90)) % 360; if (lastMouse) updateGhost(lastMouse.x, lastMouse.y); return; }
     if (S.selected !== null) { rotateSelected(e.shiftKey ? -15 : 15); return; }
   }
-  if (/^[1-9]$/.test(k)) { setTool(TOOLS[+k - 1]); return; }
-  const map = { v: 'select', c: 'block', b: 'beam', p: 'pin', m: 'servo', u: 'pulley', f: 'string', w: 'winch', x: 'erase' };
+  if (/^[0-9]$/.test(k)) { setTool(TOOLS[(+k + 9) % 10]); return; }
+  const map = { v: 'select', c: 'block', b: 'beam', p: 'pin', m: 'servo', u: 'pulley', f: 'string', w: 'winch', x: 'erase', t: 'measure' };
   if (map[k]) setTool(map[k]);
 });
 
+// ------------------------------------------------------------------ selection (one or many)
+function selIds() { return S.multi.length ? S.multi : S.selected !== null ? [S.selected] : []; }
+function showSelection() {
+  for (const i of selIds()) view.setHighlight(i, true, 0x3a6fd8);
+  drawStrings();
+  renderLegend();
+  renderInspector();
+  updateGizmo();
+}
+function select(id, add = false) {
+  for (const i of selIds()) view.setHighlight(i, false);
+  if (add && id !== null) {
+    const cur = new Set(selIds());
+    if (cur.has(id)) cur.delete(id); else cur.add(id);
+    const list = [...cur];
+    S.selected = cur.has(id) ? id : (list[list.length - 1] ?? null);
+    S.multi = list.length > 1 ? list : [];
+  } else if (!(add && id === null)) { S.multi = []; S.selected = id; }
+  showSelection();
+}
+function selectMany(ids) {
+  for (const i of selIds()) view.setHighlight(i, false);
+  S.multi = ids.length > 1 ? [...ids] : [];
+  S.selected = ids[0] ?? null;
+  showSelection();
+}
+// Everything attached to a piece: what is pinned, glued or geared to it, with wheels and strings.
+function attachedTo(partId) {
+  const parts = moveSet(partId, true).filter((o) => S.doc.parts.includes(o)).map((p) => p.id);
+  const set = withDependents(S.doc, parts);
+  return [...parts, ...set.pulleys.map((w) => w.id), ...set.winches.map((w) => w.id)];
+}
+// What moves when the selection moves.
+function moveItems(ids, group = false) {
+  const set = new Set();
+  for (const id of ids) {
+    const f = findById(S.doc, id);
+    if (!f || f.coll === 'strings') continue;
+    if (f.coll === 'parts') moveSet(id, group).forEach((o) => set.add(o)); else set.add(f.obj);
+  }
+  return [...set];
+}
+function selectionSet() { return withDependents(S.doc, selIds()); }
+function deleteSelection() {
+  const ids = selIds();
+  if (!ids.length) return;
+  pushUndo();
+  ids.forEach(removeObject);
+  S.selected = null; S.multi = [];
+  commit();
+}
+// Copies of the selection in a row: `count` pieces in all, `step` holes apart along a world axis.
+function repeatSelection(count, axis, step) {
+  const set = selectionSet(), b = boundsOf(set);
+  if (!b) return;
+  const pitch = step > 0 ? step * P : Math.max(P, Math.ceil((b.max[axis] - b.min[axis] - 0.5) / P) * P);
+  pushUndo();
+  const made = [];
+  for (let i = 1; i < count; i++) {
+    const d = [0, 0, 0];
+    d[axis] = (axis === 1 ? -1 : 1) * pitch * i; // "depth" grows towards you
+    made.push(...cloneItems(S.doc, selIds(), xfShift(d)));
+  }
+  const keep = selIds();
+  commit();
+  selectMany([...keep, ...made]);
+  toast(`${count - 1} ${count === 2 ? 'copia' : 'copie'} in fila, a ${pitch / P} fori di passo.`);
+}
+function duplicateSelected() {
+  const set = selectionSet(), b = boundsOf(set);
+  if (!b) return;
+  pushUndo();
+  const made = cloneItems(S.doc, selIds(), xfShift([Math.max(P, Math.ceil((b.max[0] - b.min[0] - 0.5) / P) * P), 0, 0]));
+  commit();
+  selectMany(made);
+}
+function mirrorSelection() {
+  const set = selectionSet(), b = boundsOf(set);
+  if (!b) return;
+  pushUndo();
+  const m = Math.ceil((b.max[0] + 0.5) / P) * P; // a lattice plane just to the right of the selection
+  const made = cloneItems(S.doc, selIds(), xfMirrorX(m));
+  commit();
+  selectMany(made);
+  toast('Copia specchiata a destra: trascinala dove serve.');
+}
+function hideSelection() {
+  const ids = selIds().filter((id) => { const f = findById(S.doc, id); return f && f.coll !== 'strings'; });
+  if (!ids.length) return;
+  ids.forEach((id) => S.hidden.add(id));
+  select(null);
+  applyHidden();
+}
+function applyHidden() {
+  for (const id of [...S.hidden]) if (!findById(S.doc, id)) S.hidden.delete(id);
+  view.setHidden(S.hidden);
+  const b = $('btnShowAll');
+  b.hidden = !S.hidden.size;
+  b.textContent = `Mostra tutto (${S.hidden.size} nascosti)`;
+}
+
+// ------------------------------------------------------------------ move arrows and stretch pads
+// Like the triad of a CAD: a coloured arrow per axis moves the selection along it, and a single
+// block also gets a pad on every face to pull it longer or push it shorter.
+const gizmo = new THREE.Group();
+view.scene.add(gizmo);
+const AX_COL = [0xe03131, 0x2f9e44, 0x1c7ed6];
+const AX_DIR = [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)];
+const gizMat = AX_COL.map((c) => new THREE.MeshBasicMaterial({ color: c, depthTest: false, transparent: true, opacity: 0.95 }));
+const padMat = new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false, transparent: true, opacity: 0.92 });
+const yUp = new THREE.Vector3(0, 1, 0);
+function updateGizmo() {
+  gizmo.clear();
+  if (S.mode !== 'edit' || S.tool !== 'select') return;
+  const ids = new Set(selIds());
+  const sel = { parts: S.doc.parts.filter((p) => ids.has(p.id)), pulleys: S.doc.pulleys.filter((p) => ids.has(p.id)), winches: S.doc.winches.filter((p) => ids.has(p.id)) };
+  const b = boundsOf(sel);
+  if (!b) return;
+  const c = new THREE.Vector3((b.min[0] + b.max[0]) / 2, (b.min[1] + b.max[1]) / 2, (b.min[2] + b.max[2]) / 2);
+  const half = [0, 1, 2].map((k) => (b.max[k] - b.min[k]) / 2);
+  const k = view.camera === view.ortho ? clamp(view.orthoHalf / view.ortho.zoom / 110, 0.7, 3) : clamp(view.camera.position.distanceTo(c) / 320, 0.7, 3);
+  for (let a = 0; a < 3; a++) {
+    // the depth arrow points towards you
+    const dir = AX_DIR[a].clone().multiplyScalar(a === 1 ? -1 : 1);
+    const g = new THREE.Group();
+    const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.8 * k, 0.8 * k, 11 * k, 10), gizMat[a]);
+    shaft.position.y = 5.5 * k;
+    const tip = new THREE.Mesh(new THREE.ConeGeometry(2.4 * k, 6 * k, 14), gizMat[a]);
+    tip.position.y = 14 * k;
+    g.add(shaft, tip);
+    g.quaternion.setFromUnitVectors(yUp, dir);
+    g.position.copy(c).addScaledVector(dir, half[a] + 3.5 * k);
+    g.traverse((m) => { m.renderOrder = 20; m.userData.giz = { type: 'move', dir }; });
+    gizmo.add(g);
+  }
+  if (sel.parts.length === 1 && ids.size === 1 && isBlock(sel.parts[0])) {
+    for (let a = 0; a < 3; a++) for (const side of [1, -1]) {
+      const dims = [5 * k, 5 * k, 5 * k];
+      dims[a] = 1;
+      const pad = new THREE.Mesh(new THREE.BoxGeometry(...dims), padMat);
+      const edge = new THREE.LineSegments(new THREE.EdgesGeometry(pad.geometry), new THREE.LineBasicMaterial({ color: AX_COL[a], depthTest: false }));
+      pad.add(edge);
+      pad.position.copy(c).addScaledVector(AX_DIR[a], side * (half[a] + 0.6));
+      pad.renderOrder = 21; edge.renderOrder = 22;
+      pad.userData.giz = { type: 'size', axis: a, side, dir: AX_DIR[a].clone().multiplyScalar(side) };
+      edge.raycast = () => {};
+      gizmo.add(pad);
+    }
+  }
+}
+function pickGizmo(sx, sy) {
+  if (!gizmo.children.length) return null;
+  const hit = view.ray(sx, sy).intersectObjects(gizmo.children, true)[0];
+  return hit ? { ...hit.object.userData.giz, point: hit.point } : null;
+}
+// How far along the line (p0, dir) the mouse is pointing.
+function axisParam(sx, sy, p0, dir) {
+  const ray = view.ray(sx, sy).ray;
+  const w = p0.clone().sub(ray.origin);
+  const b = dir.dot(ray.direction), d = dir.dot(w), e = ray.direction.dot(w);
+  const den = 1 - b * b;
+  return den < 1e-4 ? 0 : (b * e - d) / den;
+}
+function startGizmo(g) {
+  if (g.type === 'move') {
+    const items = moveItems(selIds());
+    S.move = { p0: g.point.clone(), axis: g.dir, items, orig: items.map(coordsOf), d: [0, 0, 0], undone: false, selectId: S.selected, keep: true };
+  } else {
+    const part = S.doc.parts.find((p) => p.id === S.selected);
+    S.resize = { part, axis: g.axis, side: g.side, dir: g.dir, p0: g.point.clone(), s0: [...part.s], c0: [...part.c], undone: false };
+  }
+}
+function updateResize(sx, sy) {
+  const r = S.resize, p = r.part, a = r.axis;
+  const n = clamp(r.s0[a] + Math.round(axisParam(sx, sy, r.p0, r.dir) / P), 1, 40);
+  if (n === p.s[a]) return;
+  const was = { s: [...p.s], c: [...p.c] };
+  if (!r.undone) { pushUndo(); r.undone = true; }
+  p.s[a] = n;
+  p.c[a] = r.side < 0 ? r.c0[a] - (n - r.s0[a]) * P : r.c0[a];
+  if (blocked(p, p.id)) { p.s = was.s; p.c = was.c; return; }
+  view.rebuild(S.doc);
+  view.setHighlight(p.id, true, 0x3a6fd8);
+  updateGizmo();
+  ghostLabels = [{ text: `${p.s[0]}×${p.s[1]}×${p.s[2]} fori · ${p.s.map((v) => v * P).join('×')} mm`, pos: [p.c[0] + (p.s[0] - 1) * P / 2, p.c[1] + (p.s[1] - 1) * P / 2, p.c[2] + (p.s[2] - 0.5) * P + 4], cls: 'ghost' }];
+  schedulePreview();
+}
+
+// ------------------------------------------------------------------ tape measure
+const measureG = new THREE.Group();
+view.scene.add(measureG);
+const measMat = new THREE.MeshBasicMaterial({ color: 0x111418, depthTest: false });
+const measLine = new THREE.LineBasicMaterial({ color: 0x111418, depthTest: false });
+function measurePoint(sx, sy) {
+  const h = hoverTarget(sx, sy, { shafts: false });
+  if (h && h.t !== 'guide') { const p = facePoint(h.n, h.x, h.z, h.layer, h.sgn, h.i === -1 || h.t === 'floor' ? P / 2 - BEAM_W / 2 : 0); return { p: [p.x, p.y, p.z], h }; }
+  const s = view.pickSurface(sx, sy);
+  return s.point ? { p: [s.point.x, s.point.y, s.point.z] } : null;
+}
+function distText(a, b) {
+  const d = a.map((v, k) => b[k] - v), L = Math.hypot(...d);
+  let t = `${fmt(L, 1)} mm`;
+  const holes = L / P;
+  if (L > 1 && Math.abs(holes - Math.round(holes)) < 0.02) t += ` · ${Math.round(holes)} ${Math.round(holes) === 1 ? 'foro' : 'fori'}`;
+  const comp = [['↔', d[0]], ['⤢', d[1]], ['↕', d[2]]].filter(([, v]) => Math.abs(v) > 0.05);
+  if (comp.length > 1) t += '   ' + comp.map(([s, v]) => `${s} ${fmt(Math.abs(v), 1)}`).join('  ');
+  return t;
+}
+function drawMeasure(live = null) {
+  measureG.clear();
+  const m = S.measure;
+  if (!m) return;
+  const pts = [m.a, m.b || live].filter(Boolean);
+  for (const p of pts) { const s = new THREE.Mesh(new THREE.SphereGeometry(1.3, 12, 10), measMat); s.position.set(...p); s.renderOrder = 15; measureG.add(s); }
+  if (pts.length === 2) {
+    const l = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts.map((p) => new THREE.Vector3(...p))), measLine);
+    l.renderOrder = 15;
+    measureG.add(l);
+    m.label = { text: distText(pts[0], pts[1]), pos: pts[0].map((v, k) => (v + pts[1][k]) / 2), cls: 'measure' };
+  } else m.label = null;
+}
+function clickMeasure(sx, sy) {
+  const q = measurePoint(sx, sy);
+  if (!q) return;
+  if (!S.measure || S.measure.b) S.measure = { a: q.p, b: null }; else S.measure.b = q.p;
+  drawMeasure();
+}
+
+// ------------------------------------------------------------------ model facts: weight, centre of mass, bill of materials
+const comG = new THREE.Group();
+view.scene.add(comG);
+function updateCom() {
+  comG.clear();
+  const sim = S.mode === 'run' ? S.sim : S.preview;
+  if (!S.showCom || !sim) return;
+  const m = sim.massProps();
+  if (!m.mass) return;
+  const ball = new THREE.Mesh(new THREE.SphereGeometry(2.6, 16, 12), new THREE.MeshBasicMaterial({ color: 0xf2b51c, depthTest: false }));
+  ball.position.set(...m.com);
+  ball.renderOrder = 16;
+  const drop = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(...m.com), new THREE.Vector3(m.com[0], m.com[1], FLOOR.z)]), new THREE.LineDashedMaterial({ color: 0x111418, dashSize: 2, gapSize: 2, depthTest: false }));
+  drop.computeLineDistances();
+  drop.renderOrder = 16;
+  comG.add(ball, drop);
+  S.comLabel = { text: `baricentro · ${fmt(m.mass * 1000, 1)} g`, pos: m.com, cls: 'ghost' };
+}
+function renderModel() {
+  const doc = S.doc;
+  const rows = bom(doc, (S.mode === 'run' ? S.sim : S.preview)?.lengths || {});
+  $('modelSec').hidden = !rows.length;
+  if (!rows.length) return;
+  const n = doc.parts.length;
+  const mass = S.mass ? `${fmt(S.mass * 1000, S.mass < 0.1 ? 1 : 0)} g` : '—';
+  $('massInfo').innerHTML = `<span>${n} ${n === 1 ? 'pezzo' : 'pezzi'}</span><span class="num">${mass}</span>`;
+  const ul = $('bom');
+  ul.innerHTML = '';
+  for (const r of rows) {
+    const li = document.createElement('li');
+    li.innerHTML = `<span class="bq">${r.count}×</span><span class="bl"></span><span class="bn"></span>`;
+    li.querySelector('.bl').textContent = r.label;
+    li.querySelector('.bn').textContent = r.note || '';
+    li.title = 'Clicca per selezionarli tutti';
+    li.onclick = () => { if (S.mode === 'edit') setTool('select'); selectMany(r.ids); };
+    ul.appendChild(li);
+  }
+}
+function exportStl() {
+  const ids = new Set(selIds());
+  let parts = S.doc.parts.filter((p) => !isServo(p) && ids.has(p.id));
+  if (!parts.length) parts = S.doc.parts.filter((p) => !isServo(p));
+  if (!parts.length) { toast('Non ci sono travi o blocchi da esportare.'); return; }
+  const g = new THREE.Group();
+  for (const p of parts) {
+    const m = new THREE.Group();
+    if (isBlock(p)) m.add(new THREE.Mesh(view.blockGeometry(p.s)));
+    else m.add(new THREE.Mesh(view.beamGeometry(p.holes)), new THREE.Mesh(view.guideGeometry(p.holes)));
+    view.placePart(m, p);
+    g.add(m);
+  }
+  g.updateMatrixWorld(true);
+  const data = new STLExporter().parse(g, { binary: true });
+  saveFile(slug(S.projectName) + '.stl', data, 'model/stl');
+  toast(`${parts.length} ${parts.length === 1 ? 'pezzo esportato' : 'pezzi esportati'} in STL (millimetri).`);
+}
+
+// ------------------------------------------------------------------ pose sequence
+// Save the slider positions as poses; with two or more the robot plays them in a loop.
+const clonePose = (c) => ({ winch: { ...c.winch }, servo: { ...c.servo } });
+function hasMotors() { return servoList().length > 0 || S.doc.winches.some((w) => winchStrings(w).length); }
+function renderSeq() {
+  const sec = $('seqSec'), el = $('seq');
+  sec.hidden = !hasMotors();
+  if (sec.hidden) return;
+  const poses = (S.doc.poses ||= []);
+  el.innerHTML = '';
+  const row = document.createElement('div');
+  row.className = 'seg';
+  poses.forEach((p, i) => {
+    const b = document.createElement('button');
+    b.className = 'pose' + (S.seq && S.seq.i === i ? ' on' : '');
+    b.innerHTML = `${i + 1}<span class="x" title="Togli questa posa">×</span>`;
+    b.title = 'Vai a questa posa';
+    b.onclick = (e) => {
+      if (e.target.classList.contains('x')) { poses.splice(i, 1); stopSeq(); markDirty(); renderSeq(); return; }
+      stopSeq();
+      S.controls = clonePose(p); S.sim?.setControls(S.controls); renderControls(); markDirty();
+    };
+    row.appendChild(b);
+  });
+  const add = document.createElement('button');
+  add.textContent = '＋ Salva posa';
+  add.title = 'Ricorda la posizione attuale degli slider';
+  add.onclick = () => { poses.push(clonePose(S.controls)); markDirty(); renderSeq(); };
+  row.appendChild(add);
+  el.appendChild(row);
+  if (poses.length >= 2) {
+    const play = document.createElement('button');
+    play.className = 'primary';
+    play.textContent = S.seq ? '■ Ferma la sequenza' : '▶ Riproduci in sequenza';
+    play.onclick = () => { if (S.seq) stopSeq(); else { if (S.mode !== 'run') startSim(); if (S.mode === 'run') { S.paused = false; S.seq = { i: 0, t: 0 }; syncRunUI(); } } renderSeq(); };
+    el.appendChild(play);
+  } else {
+    const p = document.createElement('p');
+    p.className = 'empty';
+    p.textContent = 'Metti gli slider in una posizione e salvala. Con due o più pose il robot le ripete una dopo l\'altra.';
+    el.appendChild(p);
+  }
+}
+function stopSeq() { if (S.seq) { S.seq = null; renderSeq(); } }
+function stepSeq(dt) {
+  const poses = S.doc.poses || [], q = S.seq;
+  if (!q || poses.length < 2) { S.seq = null; return; }
+  const MOVE = 1.0, HOLD = 0.5;
+  q.t += dt;
+  const a = poses[q.i % poses.length], b = poses[(q.i + 1) % poses.length];
+  const u = Math.min(1, q.t / MOVE), e = u * u * (3 - 2 * u);
+  for (const k of ['winch', 'servo']) for (const id of new Set([...Object.keys(a[k]), ...Object.keys(b[k])])) S.controls[k][id] = (a[k][id] ?? 0) + ((b[k][id] ?? 0) - (a[k][id] ?? 0)) * e;
+  S.sim.setControls(S.controls);
+  if (q.t > MOVE + HOLD) { q.i = (q.i + 1) % poses.length; q.t = 0; renderSeq(); }
+}
+// keep the sliders in step while a sequence drives them
+function syncSliders() {
+  for (const box of $('controls').querySelectorAll('.ctl')) {
+    const r = box.querySelector('input[type=range]');
+    const w = box.dataset.winch, v = w ? S.controls.winch[w] ?? 0 : S.controls.servo[box.dataset.pin] ?? 0;
+    r.value = v;
+    box.querySelector('[data-v]').textContent = w ? `gira ${fmt(v, 0)} mm` : `${fmt(v, 0)}°`;
+  }
+}
+
 // ------------------------------------------------------------------ side panel
-function renderPanel() { renderControls(); renderLegend(); renderInspector(); renderWarnings(); }
+function renderPanel() { renderControls(); renderSeq(); renderLegend(); renderInspector(); renderWarnings(); renderModel(); }
 
 function stringName(s) {
   if (s.name) return s.name;
@@ -1269,6 +1642,7 @@ function renderInspector() {
   }
   const o = f.obj;
   const editable = S.mode === 'edit';
+  const many = S.multi.length > 1;
   const add = (html) => { const d = document.createElement('div'); d.innerHTML = html; el.appendChild(d.firstElementChild); return el.lastElementChild; };
   const numProp = (label, value, min, max, step, onChange, unit = '') => {
     const id = 'in_' + label.replace(/\W+/g, '_');
@@ -1313,6 +1687,36 @@ function renderInspector() {
     info('Tensione', sp.volt);
   };
 
+  // what a CAD calls pattern, mirror, hide: for one piece or for the whole selection
+  const groupActions = () => {
+    add(`<h3 class="sub">${many ? 'Tutti insieme' : 'Copie'}</h3>`);
+    const row = add(`<div class="pattern"><label>Ripeti <input type="number" id="patN" min="2" max="30" value="3" ${editable ? '' : 'disabled'}> volte</label>
+      <label>ogni <input type="number" id="patStep" min="0" max="60" value="0" title="0 = una accanto all'altra" ${editable ? '' : 'disabled'}> fori</label></div>`);
+    const seg = add('<div class="seg"></div>');
+    for (const [axis, txt, tip] of [[0, '→ a destra', 'Lungo la larghezza'], [2, '↑ in alto', 'In altezza'], [1, '↙ verso di te', 'In profondità']]) {
+      const b = document.createElement('button');
+      b.textContent = txt; b.title = tip; b.disabled = !editable;
+      b.onclick = () => repeatSelection(clamp(+row.querySelector('#patN').value || 2, 2, 30), axis, clamp(+row.querySelector('#patStep').value || 0, 0, 60));
+      seg.appendChild(b);
+    }
+    const seg2 = add('<div class="seg"></div>');
+    for (const [txt, tip, fn] of [['Specchia', 'Copia speculare, come mano destra e sinistra', mirrorSelection], ['Duplica', 'Ctrl+D', duplicateSelected], ['Nascondi', 'H · Shift+H mostra tutto', hideSelection]]) {
+      const b = document.createElement('button');
+      b.textContent = txt; b.title = tip; b.disabled = !editable;
+      b.onclick = fn;
+      seg2.appendChild(b);
+    }
+  };
+  if (many) {
+    const set = selectionSet(), bb = boundsOf(set);
+    $('inspTitle').textContent = `${S.multi.length} pezzi selezionati`;
+    if (bb) info('Ingombro', `${[0, 1, 2].map((k) => fmt(bb.max[k] - bb.min[k], 0)).join(' × ')} mm`);
+    add(`<p class="empty">Con loro vengono ${set.pins.length} perni e ${set.strings.length} fili. Trascina uno dei pezzi o le frecce per spostarli tutti.</p>`);
+    groupActions();
+    const b = add(`<button class="danger" ${editable ? '' : 'disabled'}>Elimina tutti</button>`);
+    b.onclick = deleteSelection;
+    return;
+  }
   if (f.coll === 'parts' && isBlock(o)) {
     $('inspTitle').textContent = 'Blocco';
     info('Misura', `${o.s.map((n) => n * P).join(' × ')} mm`);
@@ -1322,6 +1726,7 @@ function renderInspector() {
     const gl = add(`<label class="prop"><span>Si incolla a ciò che tocca</span><input type="checkbox" ${o.glue !== false ? 'checked' : ''} ${editable ? '' : 'disabled'}></label>`);
     gl.querySelector('input').onchange = (e) => { pushUndo(); if (e.target.checked) delete o.glue; else o.glue = false; commit(); };
     add('<p class="empty">Ha un foro su ogni faccia: ci passano perni e alberi dei servo, e i fili ci si legano. Togli la colla se deve muoversi accanto ad altri blocchi.</p>');
+    groupActions();
     delBtn();
   } else if (f.coll === 'parts' && isServo(o)) {
     $('inspTitle').textContent = 'Servo ' + o.model;
@@ -1336,6 +1741,7 @@ function renderInspector() {
       const a = S.sim.pinAngle(o.id);
       if (a !== null) info('Angolo adesso', `${fmt(a, 1)}°`);
     }
+    groupActions();
     delBtn();
   } else if (f.coll === 'parts') {
     $('inspTitle').textContent = 'Trave';
@@ -1345,6 +1751,7 @@ function renderInspector() {
     numProp('Strato', o.layer, -40, 40, 1, (v) => (o.layer = v));
     info('Piano', FAM_LABEL[fam(o)]);
     swatches(BEAM_COLORS);
+    groupActions();
     delBtn();
   } else if (f.coll === 'pins') {
     $('inspTitle').textContent = PIN_LABEL[o.type];
@@ -1425,7 +1832,16 @@ function renderInspector() {
 function renderWarnings() {
   const list = S.warnings || [];
   $('warnSec').hidden = !list.length;
-  $('warnings').innerHTML = list.map((w) => `<li class="${w.level}">${escapeHtml(w.text)}</li>`).join('');
+  const ul = $('warnings');
+  ul.innerHTML = '';
+  for (const w of list) {
+    const li = document.createElement('li');
+    li.className = w.level;
+    li.textContent = w.text;
+    const ids = (w.ids || []).filter((id) => findById(S.doc, id));
+    if (ids.length) { li.classList.add('go'); li.title = 'Clicca per vedere quali pezzi'; li.onclick = () => { if (S.mode === 'edit') setTool('select'); selectMany(ids); }; }
+    ul.appendChild(li);
+  }
 }
 
 function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
@@ -1523,6 +1939,10 @@ $('btnExportMjcf').onclick = () => {
     saveFile(slug(S.projectName) + '.xml', xml, 'application/xml');
   } catch (e) { toast('Il modello non si compila: ' + String(e.message || e).split('\n')[0]); }
 };
+$('btnExportStl').onclick = exportStl;
+$('btnBomCsv').onclick = () => saveFile(slug(S.projectName) + '-distinta.csv', '\ufeff' + bomCsv(bom(S.doc, S.preview?.lengths || {})), 'text/csv');
+$('btnShowAll').onclick = () => { S.hidden.clear(); applyHidden(); };
+$('chkCom').onchange = (e) => { S.showCom = e.target.checked; S.comLabel = null; updateCom(); };
 $('projName').onchange = (e) => { S.projectName = e.target.value.trim() || 'Progetto senza nome'; markDirty(); };
 $('btnProjects').onclick = openProjects;
 $('projClose').onclick = () => ($('projDialog').hidden = true);
@@ -1548,6 +1968,7 @@ function frame(now) {
   last = now;
   if (S.mode === 'run' && S.sim) {
     if (!S.paused) {
+      if (S.seq) stepSeq(dt * S.speed);
       S.sim.step(dt * S.speed, S.drag ? dragForce : null);
       if (S.sim.snaps.size > (S.snapsShown || 0)) reportSnaps();
     }
@@ -1557,6 +1978,8 @@ function frame(now) {
     if (now - labelT > 120) {
       labelT = now;
       updateLiveReadouts();
+      if (S.seq) syncSliders();
+      if (S.showCom) updateCom();
       const labels = [];
       for (const s of S.doc.strings) {
         const line = view.stringLines.get(s.id);
@@ -1569,12 +1992,13 @@ function frame(now) {
         labels.push({ text: T < 0.005 ? 'lasco' : `${fmt(T, 2)} N`, pos: [mid[0], mid[1] - 4, mid[2]], cls: T < 0.005 ? 'slack' : T >= (s.fmaxRef ?? 10) * 0.98 ? 'warn' : '' });
       }
       if (S.drag?.point) labels.push({ text: '✋', pos: [S.drag.target.x * 1000, S.drag.target.y * 1000, S.drag.target.z * 1000], cls: 'ghost' });
+      if (S.showCom && S.comLabel) labels.push(S.comLabel);
       view.setLabels(labels);
       if (S.selected !== null) renderInspectorLive();
     }
   } else if (now - labelT > 100) {
     labelT = now;
-    view.setLabels(ghostLabels);
+    view.setLabels([...ghostLabels, ...(S.measure?.b && S.measure.label ? [S.measure.label] : []), ...(S.showCom && S.comLabel ? [S.comLabel] : [])]);
   }
   view.render();
   cube.render();

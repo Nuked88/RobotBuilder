@@ -28,6 +28,7 @@
           <button id="btnNew">Nuovo progetto vuoto</button>
           <button id="btnImport">Apri file JSON…</button>
           <button id="btnExportJson">Scarica JSON</button>
+          <button id="btnExportStl">Scarica STL per la stampa 3D<br><span class="sub">I pezzi selezionati, o tutti se non ne hai scelti</span></button>
           <button id="btnExportMjcf">Scarica modello MuJoCo (MJCF)</button>
         </div>
       </div>
@@ -49,6 +50,7 @@
     <button data-tool="string" title="Filo (F)"><svg viewBox="0 0 24 24"><path d="M4 18c4-10 6 2 10-6s4-6 6-8"/><circle cx="4" cy="18" r="1.6"/><circle cx="20" cy="4" r="1.6"/></svg><span>Filo</span><kbd>F</kbd></button>
     <button data-tool="winch" title="Verricello: motore che tira un filo (W)"><svg viewBox="0 0 24 24"><rect x="3" y="7" width="10" height="10" rx="1.5"/><circle cx="17" cy="12" r="4"/><path d="M17 8v-5"/></svg><span>Verricello</span><kbd>W</kbd></button>
     <button data-tool="erase" title="Gomma (X)"><svg viewBox="0 0 24 24"><path d="M4 16l8-8 6 6-6 6H8z"/><path d="M14 20h6"/></svg><span>Gomma</span><kbd>X</kbd></button>
+    <button data-tool="measure" title="Metro: distanza tra due punti (T)"><svg viewBox="0 0 24 24"><path d="M3 16 16 3l5 5L8 21z"/><path d="m7 12 2 2M10 9l2 2M13 6l2 2"/></svg><span>Metro</span><kbd>T</kbd></button>
   </nav>
 
   <main class="stage">
@@ -63,6 +65,8 @@
       </div>
     </div>
     <div class="viewbtns">
+      <button id="btnShowAll" class="chip" hidden>Mostra tutto</button>
+      <label class="chip" title="Mostra il baricentro e il peso totale"><input type="checkbox" id="chkCom"> Baricentro</label>
       <label class="chip"><input type="checkbox" id="chkGravity" checked> Gravità</label>
     </div>
     <div class="runinfo" id="runinfo" hidden>
@@ -96,6 +100,10 @@
       <h2>Comandi</h2>
       <div id="controls" class="controls"></div>
     </section>
+    <section id="seqSec" hidden>
+      <h2>Sequenza di pose</h2>
+      <div id="seq" class="seq"></div>
+    </section>
     <section id="legendSec" hidden>
       <h2>Fili</h2>
       <ul id="legend" class="legend"></ul>
@@ -107,6 +115,12 @@
     <section id="warnSec" hidden>
       <h2>Da controllare</h2>
       <ul id="warnings" class="warnings"></ul>
+    </section>
+    <section id="modelSec" hidden>
+      <h2>Distinta pezzi</h2>
+      <div id="massInfo" class="prop"></div>
+      <ul id="bom" class="bom"></ul>
+      <button id="btnBomCsv">Scarica la distinta (CSV)</button>
     </section>
   </aside>
 

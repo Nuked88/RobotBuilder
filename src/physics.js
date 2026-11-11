@@ -183,6 +183,14 @@ export class Sim {
     return this.data.qfrc_actuator[j.dof] + this.data.qfrc_passive[j.dof] + this.data.qfrc_constraint[j.dof];
   }
 
+  // Total mass (kg) and centre of mass (mm) of everything built.
+  massProps() {
+    const n = this.model.nbody, bm = this.model.body_mass, xi = this.data.xipos;
+    let mass = 0; const c = [0, 0, 0];
+    for (let b = 1; b < n; b++) { mass += bm[b]; for (let k = 0; k < 3; k++) c[k] += bm[b] * xi[3 * b + k]; }
+    return { mass, com: mass ? c.map((v) => (v / mass) * 1000) : [0, 0, 0] };
+  }
+
   applyForce(partId, pointWorld, force) {
     const b = this.bodyId[partId];
     if (b === undefined || b < 0) return;
