@@ -14,6 +14,7 @@
     </div>
     <div class="group">
       <button id="btnProjects">Progetti</button>
+      <button id="btnTour" title="Tutorial guidato: costruisci un piccolo braccio passo passo">Tutorial</button>
       <div class="menu">
         <button id="btnExample">Esempi ▾</button>
         <div class="menupop" id="exMenu" hidden>
@@ -58,6 +59,12 @@
     <div id="viewport" class="viewport"></div>
     <div class="subtools" id="subtools" hidden></div>
     <div class="typed" id="typed" hidden></div>
+    <div class="tour" id="tour" hidden role="dialog" aria-label="Tutorial">
+      <div class="thead"><span id="tourN"></span><span id="tourOk" class="ok" hidden>✓ Fatto</span><button id="tourClose" class="icon" aria-label="Chiudi il tutorial" title="Chiudi il tutorial"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
+      <h3 id="tourT"></h3>
+      <div id="tourB" class="tbody"></div>
+      <div class="actions"><button id="tourBack">Indietro</button><button id="tourAuto" title="Fa questo passo al posto tuo">Fallo tu</button><span class="spacer"></span><button id="tourNext">Avanti</button></div>
+    </div>
     <div class="navcube" id="navcube">
       <div class="navbtns">
         <button id="btnFront" class="icon" title="Vista frontale, centrata sul modello" aria-label="Vista frontale"><svg viewBox="0 0 24 24"><path d="M4 11 12 4l8 7"/><path d="M6 10v9h12v-9"/></svg></button>
@@ -89,6 +96,7 @@
         <p class="mouse">Tasto destro: ruota la vista · rotella: zoom · tasto centrale: sposta · 1–9: attrezzi · Ctrl+Z: annulla</p>
         <div class="actions">
           <button id="wEmpty" class="primary">Parti da zero</button>
+          <button id="wTour" class="primary">Tutorial guidato (3 minuti)</button>
           <button id="wExample3">Esempio: braccio con due servo</button>
           <button id="wExample">Esempio: dito con elastici</button>
           <button id="wExample2">Esempio: dito a cinghia</button>

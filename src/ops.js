@@ -110,7 +110,7 @@ export function bom(doc, lengths = {}) {
   const add = (label, id, note) => { if (!rows.has(label)) rows.set(label, { label, count: 0, ids: [], note }); const r = rows.get(label); r.count++; r.ids.push(id); };
   for (const p of doc.parts) {
     if (isBlock(p)) { const s = [...p.s].sort((a, b) => b - a); add(`Blocco ${s.join('×')}`, p.id, `${s.map((n) => n * P).join('×')} mm`); }
-    else if (isServo(p)) add(`Servo ${p.model}`, p.id, SERVO_MODELS[p.model]?.kind);
+    else if (isServo(p)) add(`Servo ${p.model}`, p.id, SERVO_MODELS[p.model] ? `${String(SERVO_MODELS[p.model].kgcm).replace('.', ',')} kg·cm` : '');
     else add(partLabel(p), p.id, `${(p.holes - 1) * P + 7.2} mm`.replace('.', ','));
   }
   for (const p of doc.pins) add(PIN_LABEL[p.type] + (p.model ? ' ' + p.model : ''), p.id);

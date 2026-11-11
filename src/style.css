@@ -219,3 +219,15 @@ button.primary { background: var(--accent); color: var(--accent-ink); border-col
 .typed span { min-width: 22px; text-align: right; padding: 1px 4px; border-radius: 4px; color: var(--muted); }
 .typed span.on { background: var(--focus); color: #fff; }
 .typed small { color: var(--muted); font: 600 10px var(--font-ui); border: 1px solid var(--line); border-radius: 4px; padding: 1px 4px; margin-left: 4px; }
+
+.tour { position: absolute; left: 12px; bottom: 56px; z-index: 15; width: min(340px, calc(100% - 24px)); background: var(--raised); border: 1px solid var(--line); border-top: 3px solid var(--accent); border-radius: 12px; padding: 12px 14px; display: grid; gap: 8px; box-shadow: 0 12px 34px #00000038; }
+.tour .thead { display: flex; align-items: center; gap: 8px; color: var(--muted); font: 600 11px var(--font-num); }
+.tour .thead .ok { color: var(--go); font-family: var(--font-ui); font-size: 12.5px; }
+.tour .thead button { margin-left: auto; padding: 2px; border-color: transparent; background: transparent; }
+.tour .thead svg { width: 16px; height: 16px; }
+.tour h3 { margin: 0; font-size: 16px; font-weight: 800; }
+.tour .tbody { font-size: 13.5px; line-height: 1.5; }
+.tour .tbody ul { margin: 0 0 6px; padding-left: 18px; display: grid; gap: 4px; }
+.tour kbd { font: 600 11px var(--font-num); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; background: var(--surface); }
+.tour .actions { align-items: center; }
+.tour .actions button { padding: 6px 10px; font-size: 13px; }

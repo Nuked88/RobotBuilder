@@ -31,6 +31,7 @@ const S = {
   servoModel: 'SG90',
   servoAngle: 0,
   pulleyR: 6,
+  tour: null,          // guided tutorial: {i, doneAt, was}
   typed: { v: '', a: '', f: 0 }, // dimension being typed: value, angle, active field
   join: null,          // join tool: {id, i} the beam hole that will be moved
   draw: null,          // beam being drawn: {n, start:{x,z,base}, layer, sgn}
@@ -1557,6 +1558,111 @@ function exportStl() {
   toast(`${parts.length} ${parts.length === 1 ? 'pezzo esportato' : 'pezzi esportati'} in STL (millimetri).`);
 }
 
+// ------------------------------------------------------------------ guided tutorial
+// Started on request. Each step asks for one thing, notices when it is done and moves on;
+// "Fallo tu" does the step for you, so nobody gets stuck.
+const TOUR_COLOR = '#2b2f36';
+function tourDoc(stage) {
+  const d = emptyDoc();
+  const add = (p) => d.parts.push({ id: d.nextId++, ...p });
+  add({ type: 'block', c: stage >= 2 ? [-24, -56, 8] : [-8, -56, 8], s: stage >= 2 ? [7, 5, 1] : [5, 5, 1], color: TOUR_COLOR });
+  if (stage >= 3) add({ type: 'servo', model: 'MG996R', n: 'z', x: 8, z: -40, layer: 7, angle: 180 });
+  if (stage >= 4) add({ type: 'beam', n: 'z', x: 8, z: -40, layer: 7, angle: 0, holes: 7, color: '#d8342c' });
+  return d;
+}
+function tourSet(stage) {
+  stopSim();
+  pushUndo();
+  S.doc = migrate(tourDoc(stage));
+  S.selected = null; S.multi = [];
+  cancelDrafts();
+  commit();
+}
+const servoParts = () => S.doc.parts.filter(isServo);
+const TOUR = [
+  { t: 'Guardati intorno',
+    h: 'Tieni premuto il <b>tasto destro</b> e muovi il mouse per girare la vista, la <b>rotella</b> avvicina, il <b>tasto centrale</b> sposta. Il cubo in alto a destra e i due pulsanti sotto riportano la vista dritta.<br>Costruiremo un piccolo braccio che gira. Premi <b>Avanti</b>.' },
+  { t: '1. Posa un blocco',
+    h: 'Con l\'attrezzo <b>Blocco</b> (tasto <kbd>C</kbd>) <b>clicca sul pavimento</b> e, senza lasciare, <b>trascina</b> per farne una piastra. I blocchi si incollano da soli a ciò che toccano.',
+    enter: () => setTool('block'), done: () => S.doc.parts.some(isBlock), auto: () => tourSet(1) },
+  { t: '2. Dagli la misura giusta',
+    h: 'Passa alla <b>Mano</b> (<kbd>V</kbd>) e clicca il blocco. Tira una delle <b>piastrine bianche</b> sulle facce per allargarlo, oppure mentre tiri <b>scrivi un numero</b> e premi Invio. Le <b>frecce colorate</b> invece lo spostano.',
+    enter: () => { setTool('select'); S.tourRef = JSON.stringify(S.doc.parts.filter(isBlock).map((b) => b.s)); },
+    done: () => JSON.stringify(S.doc.parts.filter(isBlock).map((b) => b.s)) !== S.tourRef, auto: () => tourSet(2) },
+  { t: '3. Monta un servo',
+    h: 'Prendi il <b>Servo</b> (<kbd>M</kbd>), scegli il modello in alto e <b>clicca un foro sopra il blocco</b>. L\'albero esce dalla faccia che clicchi, <kbd>R</kbd> gira il corpo.',
+    enter: () => setTool('servo'), done: () => servoParts().length > 0, auto: () => tourSet(3) },
+  { t: '4. Metti una trave sull\'albero',
+    h: 'Con la <b>Trave</b> (<kbd>B</kbd>) <b>clicca l\'albero del servo</b>, poi scrivi <kbd>7</kbd> e premi <kbd>Invio</kbd>: nasce una trave da 7 fori. Tutto ciò che sta sull\'albero gira con il servo. <kbd>Esc</kbd> per smettere di disegnare.',
+    enter: () => setTool('beam'), done: () => servoParts().some((sv) => shaftMembers(S.doc, sv).length > 0), auto: () => tourSet(4) },
+  { t: '5. Simula',
+    h: 'Premi <b>Simula</b> (o <kbd>Spazio</kbd>) e muovi lo <b>slider del servo</b> a destra. Puoi anche afferrare i pezzi col mouse. Nel pannello leggi la coppia che il servo sta facendo.',
+    done: () => S.mode === 'run' && Object.values(S.controls.servo).some((v) => Math.abs(v) > 5),
+    auto: () => { if (!servoParts().length) tourSet(4); if (S.mode !== 'run') startSim(); const sv = servoParts()[0]; if (sv && S.mode === 'run') { S.controls.servo[sv.id] = 60; S.sim.setControls(S.controls); renderControls(); } } },
+  { t: '6. Copia tutto in un colpo',
+    h: 'Premi <b>■</b> per tornare a costruire. Poi <kbd>Ctrl</kbd>+<kbd>A</kbd> seleziona tutto e nel pannello a destra premi <b>Specchia</b>: ottieni il braccio gemello. <b>Ripeti</b> ne fa una fila, <b>Shift+clic</b> sceglie solo alcuni pezzi.',
+    enter: () => { S.tourRef = servoParts().length; },
+    done: () => S.mode === 'edit' && servoParts().length > S.tourRef,
+    auto: () => { stopSim(); if (!servoParts().length) tourSet(4); setTool('select'); selectMany(S.doc.parts.map((p) => p.id)); mirrorSelection(); } },
+  { t: '7. Falli muovere da soli',
+    h: 'Nel riquadro <b>Sequenza di pose</b>: metti gli slider in una posizione e premi <b>Salva posa</b>, cambiali e salvane un\'altra. Con due pose compare <b>Riproduci in sequenza</b> e il robot le ripete.',
+    done: () => (S.doc.poses || []).length >= 2,
+    auto: () => {
+      const ids = servoParts().map((p) => p.id);
+      S.doc.poses = [-60, 60].map((a) => ({ winch: {}, servo: Object.fromEntries(ids.map((id, k) => [id, k % 2 ? -a : a])) }));
+      markDirty(); renderSeq();
+      if (S.mode !== 'run') startSim();
+      if (S.mode === 'run') { S.paused = false; S.seq = { i: 0, t: 0 }; syncRunUI(); renderSeq(); }
+    } },
+  { t: 'Fatto! Cos\'altro c\'è',
+    h: `<ul>
+      <li><b>Unisci</b> <kbd>J</kbd>: foro di una trave, poi foro di destinazione, e la trave ci va da sola.</li>
+      <li><b>Perno</b> <kbd>P</kbd>: unisce due pezzi su un foro. Un altro clic lo blocca o lo motorizza.</li>
+      <li><b>Puleggia</b> <kbd>U</kbd>, <b>Verricello</b> <kbd>W</kbd> e <b>Filo</b> <kbd>F</kbd>: per dita e tendini. Guarda <i>Esempi, Dito con elastici</i>.</li>
+      <li><b>Metro</b> <kbd>T</kbd> misura, <b>Baricentro</b> mostra dove pesa, <kbd>H</kbd> nasconde un pezzo.</li>
+      <li><b>Distinta pezzi</b> in fondo al pannello, <b>STL</b> e JSON nel menu File.</li>
+      <li><kbd>Ctrl</kbd>+<kbd>Z</kbd> annulla sempre. I progetti si salvano da soli.</li>
+    </ul>Puoi riaprire questo tutorial quando vuoi dal pulsante <b>Tutorial</b> in alto.` },
+];
+function tourStart() {
+  $('welcome').hidden = true;
+  $('exMenu').hidden = true; $('fileMenu').hidden = true;
+  newProject(emptyDoc(), 'Tutorial');
+  view.isoView();
+  tourGo(0);
+}
+function tourGo(i) {
+  if (i < 0) return;
+  if (i >= TOUR.length) { tourEnd(); return; }
+  const st = TOUR[i];
+  S.tour = { i, doneAt: 0, was: false };
+  st.enter?.();
+  S.tour.was = !!st.done?.();
+  $('tour').hidden = false;
+  $('tourN').textContent = `${i + 1} di ${TOUR.length}`;
+  $('tourT').textContent = st.t;
+  $('tourB').innerHTML = st.h;
+  $('tourOk').hidden = !S.tour.was;
+  $('tourBack').disabled = i === 0;
+  $('tourAuto').hidden = !st.auto;
+  $('tourNext').textContent = i === TOUR.length - 1 ? 'Fine' : 'Avanti';
+  $('tourNext').classList.toggle('primary', !st.done || S.tour.was);
+}
+function tourEnd() { S.tour = null; $('tour').hidden = true; }
+// Watches for the step being done, then moves on by itself.
+function tourTick(now) {
+  const q = S.tour, st = TOUR[q.i];
+  if (!st.done || q.was) return;
+  if (!q.doneAt) { if (st.done()) { q.doneAt = now; $('tourOk').hidden = false; $('tourNext').classList.add('primary'); } }
+  else if (now - q.doneAt > 1400 && !S.move && !S.resize && !S.blockDraft) tourGo(q.i + 1);
+}
+$('btnTour').onclick = tourStart;
+$('wTour').onclick = tourStart;
+$('tourClose').onclick = tourEnd;
+$('tourBack').onclick = () => tourGo(S.tour.i - 1);
+$('tourNext').onclick = () => tourGo(S.tour.i + 1);
+$('tourAuto').onclick = () => { const q = S.tour; TOUR[q.i].auto(); };
+
 // ------------------------------------------------------------------ pose sequence
 // Save the slider positions as poses; with two or more the robot plays them in a loop.
 const clonePose = (c) => ({ winch: { ...c.winch }, servo: { ...c.servo } });
@@ -2128,6 +2234,7 @@ let labelT = 0;
 function frame(now) {
   const dt = Math.min(0.05, (now - last) / 1000);
   last = now;
+  if (S.tour) tourTick(now);
   if (S.mode === 'run' && S.sim) {
     if (!S.paused) {
       if (S.seq) stepSeq(dt * S.speed);

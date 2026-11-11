@@ -20,6 +20,10 @@ Si costruisce come coi mattoncini: clicchi una faccia e il pezzo ci si appoggia 
 
 Spazio avvia/mette in pausa la simulazione, Ctrl+Z annulla, tasto destro ruota la vista. I fili si colorano in base alla tensione e un filo lasco viene segnalato.
 
+### Tutorial guidato
+
+Il pulsante **Tutorial** in alto apre un progetto nuovo e ti fa costruire un piccolo braccio in otto passi: blocco, misura, servo, trave, simulazione, copia speculare, sequenza di pose. Ogni passo si accorge da solo quando l'hai fatto, e **Fallo tu** lo esegue al posto tuo.
+
 ### Strumenti da CAD, resi facili
 
 Idee prese dai CAD veri (SolidWorks e simili), ridotte a un clic.
