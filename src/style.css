@@ -214,3 +214,8 @@ button.primary { background: var(--accent); color: var(--accent-ink); border-col
   .group button:not(.icon):not(.play) { padding: 6px 9px; }
   .play span { display: none; }
 }
+
+.typed { position: absolute; z-index: 12; pointer-events: none; display: flex; align-items: center; gap: 6px; background: var(--raised); border: 1px solid var(--focus); border-radius: 8px; padding: 5px 8px; font: 600 13px var(--font-num); box-shadow: 0 6px 18px #00000030; white-space: nowrap; }
+.typed span { min-width: 22px; text-align: right; padding: 1px 4px; border-radius: 4px; color: var(--muted); }
+.typed span.on { background: var(--focus); color: #fff; }
+.typed small { color: var(--muted); font: 600 10px var(--font-ui); border: 1px solid var(--line); border-radius: 4px; padding: 1px 4px; margin-left: 4px; }

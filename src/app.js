@@ -8,7 +8,7 @@ import { servoParams } from './mjcf.js';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 import { withDependents, boundsOf, cloneItems, xfShift, xfMirrorX, bom, bomCsv, interferences } from './ops.js';
 import {
-  P, BEAM_W, LAYER, rad, emptyDoc, holePos, holeAt, layerBehind, pinAt, pinMembers, findById, prune, BEAM_COLORS, BLOCK_COLORS, PIN_LABEL,
+  P, BEAM_W, LAYER, rad, emptyDoc, holePos, holeAt, holeIndexAt, layerBehind, pinAt, pinMembers, findById, prune, BEAM_COLORS, BLOCK_COLORS, PIN_LABEL,
   STRING_LABEL, BOARD, FLOOR, EPS, guidePos, anchorPos, mountOf, fam, NVEC, toWorld, toFam, famQuat, isBeam, isBlock, isServo, holeWorld,
   guideWorld, wheelWorld, worldToLocal, partPose, SERVO_MODELS, servoSpec, PULLEY_SIZES, winchForce, solidBox, boxesOverlap, glueLinks,
   shaftMembers, shiftItem, partLabel,
@@ -31,6 +31,8 @@ const S = {
   servoModel: 'SG90',
   servoAngle: 0,
   pulleyR: 6,
+  typed: { v: '', a: '', f: 0 }, // dimension being typed: value, angle, active field
+  join: null,          // join tool: {id, i} the beam hole that will be moved
   draw: null,          // beam being drawn: {n, start:{x,z,base}, layer, sgn}
   blockDraft: null,    // block being stretched: {a, b, normal}
   stringDraft: null,   // {kind, anchors}
@@ -58,12 +60,14 @@ let store = null;
 
 // ------------------------------------------------------------------ hint strip
 const HINTS = {
-  select: '<b>Clicca</b> un pezzo, <b>Shift+clic</b> ne aggiunge altri, <b>doppio clic</b> prende tutto il gruppo. Tira le <b>frecce colorate</b> per spostare, le <b>piastrine</b> di un blocco per allungarlo. <b>R</b> ruota, <b>Ctrl+D</b> duplica, <b>H</b> nasconde.',
+  select: '<b>Clicca</b> un pezzo, <b>Shift+clic</b> ne aggiunge altri, <b>doppio clic</b> prende il gruppo. Tira le <b>frecce</b> per spostare o le <b>piastrine</b> per allungare, e <b>scrivi i fori</b> se vuoi un numero preciso. <b>Tab</b> va ai campi, <b>R</b> ruota, <b>H</b> nasconde.',
   measure: 'Clicca due punti per misurare la distanza: si aggancia ai fori. <b>Esc</b> toglie la misura.',
   block: '<b>Clicca una faccia</b> (pavimento, muro o un altro pezzo) per appoggiarci un blocco. <b>Trascina</b> per farne uno lungo o una piastra. <b>Clic destro</b> lo toglie. I blocchi che si toccano restano incollati.',
-  block1: 'Rilascia per posare il blocco. <b>Esc</b> annulla.',
+  block1: 'Rilascia per posare il blocco, oppure <b>scrivi la lunghezza in fori</b> e premi <b>Invio</b>. <b>Esc</b> annulla.',
   beam0: 'Clicca un <b>foro</b> dove inizia la trave: del muro, del pavimento, di una trave o di un blocco. La trave si stende sul piano della faccia che clicchi.',
-  beam1: 'Muovi il mouse e clicca dove finisce. Ogni nuova trave nasce <b>imperniata</b> al foro di partenza. <b>Esc</b> per finire.',
+  beam1: 'Muovi il mouse e clicca dove finisce, oppure <b>scrivi i fori</b>, <b>Tab</b> per l\'angolo e <b>Invio</b>. Ogni nuova trave nasce <b>imperniata</b> al foro di partenza. <b>Esc</b> per finire.',
+  join0: '<b>Unisci</b>: clicca il foro della trave che vuoi spostare.',
+  join1: 'Ora clicca il foro di destinazione (muro, pavimento, un altro pezzo, l\'albero di un servo): la trave ci va da sola e viene imperniata. <b>Esc</b> annulla.',
   pin: 'Clicca un foro per metterci un perno: unisce il pezzo con quello che c\'è dietro. Clicca un perno esistente per <b>cambiarne il tipo</b>.',
   servo: 'Clicca un foro per montarci il <b>servo</b>: l\'albero esce verso di te. <b>R</b> gira il corpo. Poi appoggia una trave o un blocco sull\'albero: è quello che il servo fa girare.',
   pulley: 'Clicca un foro per montarci una <b>puleggia</b>: il filo ci gira attorno e cambia direzione.',
@@ -79,6 +83,7 @@ function updateHint() {
   if (S.mode === 'run') k = 'run';
   else if (S.tool === 'beam') k = S.draw ? 'beam1' : 'beam0';
   else if (S.tool === 'block') k = S.blockDraft ? 'block1' : 'block';
+  else if (S.tool === 'join') k = S.join ? 'join1' : 'join0';
   else if (S.tool === 'string') k = S.stringDraft?.replaceId != null && !S.stringDraft.anchors.length ? 'reroute' : S.stringDraft ? 'string1' : 'string0';
   $('hint').innerHTML = HINTS[k] || '';
 }
@@ -621,6 +626,24 @@ function updateGhost(sx, sy) {
       l.renderOrder = 11;
       ghost.add(l);
     }
+  } else if (tool === 'join') {
+    const h = hoverTarget(sx, sy, { shafts: !!S.join });
+    S.hover = null;
+    if (!S.join) {
+      if (h && h.t === 'hole' && h.part && isBeam(h.part) && h.i >= 0) { S.hover = h; ring(h); }
+    } else if (h && h.part?.id !== S.join.id) {
+      const part = S.doc.parts.find((p) => p.id === S.join.id);
+      if (part) {
+        S.hover = h;
+        ring(h, 1.2);
+        const r = joinResult(part, S.join.i, h);
+        const mesh = new THREE.Mesh(view.beamGeometry(part.holes), ghostBeamMat);
+        const w = toWorld(r.n, r.x, r.z, r.layer);
+        mesh.position.set(w.x, w.y, w.z);
+        setQ(mesh, famQuat(r.n, part.angle));
+        ghost.add(mesh);
+      }
+    }
   } else if (tool === 'measure') {
     const q = measurePoint(sx, sy);
     if (q?.h) ring(q.h, q.h.t === 'guide' ? 0.6 : 1);
@@ -639,7 +662,18 @@ function setHover(id) {
   if (id !== null && !selIds().includes(id)) view.setHighlight(id, true, S.tool === 'erase' ? 0xff3b30 : 0x888888);
 }
 
+// What you type wins over where the mouse is: holes for the length, degrees for the angle.
 function beamEndFor(sx, sy) {
+  const r = beamEndRaw(sx, sy), t = S.typed;
+  if (!r || (!t.v && !/\d/.test(t.a))) return r;
+  const st = S.draw.start;
+  const k = t.v ? clamp(+t.v - 1, 1, 24) : r.n, angle = /\d/.test(t.a) ? +t.a : r.angle;
+  const x = st.x + k * P * Math.cos(rad(angle)), z = st.z + k * P * Math.sin(rad(angle));
+  if (Math.abs(x - r.x) < EPS && Math.abs(z - r.z) < EPS) return r;
+  const L = S.draw.layer - S.draw.sgn, hp = holeAt(S.doc, S.draw.n, x, z, L);
+  return { x, z, n: k, angle, snapped: hp && hp.kind === 'part' ? { layer: L } : null };
+}
+function beamEndRaw(sx, sy) {
   const st = S.draw.start, n = S.draw.n;
   const wp = view.famPoint(sx, sy, n, S.draw.layer);
   if (!wp) return null;
@@ -706,6 +740,7 @@ function clickBeam() {
   // keep drawing: the next beam starts from this one's end, one layer forward
   S.draw = { n, start: { x: end.x, z: end.z, base: layer }, layer: S.layerMode === 'auto' ? layer + sgn : layer, sgn };
   if (end.snapped) S.draw = null; // closed a loop: stop chaining
+  typedReset();
   updateHint();
 }
 
@@ -726,6 +761,47 @@ function clickPin() {
     S.doc.pins.push(famTag({ id: S.doc.nextId++, x: h.x, z: h.z, lo: Math.min(a, b), hi: Math.max(a, b), type: S.pinType }, h.n));
   }
   commit();
+}
+
+// Join, like the joint of a CAD: pick a hole of a beam, then the hole it must sit on. The beam
+// goes there by itself (changing plane if it has to) and a free pin holds the two together.
+function joinResult(part, i, h) {
+  const a = rad(part.angle);
+  return { n: h.n, layer: h.layer + h.sgn, x: h.x - i * P * Math.cos(a), z: h.z - i * P * Math.sin(a) };
+}
+function clickJoin() {
+  const h = S.hover;
+  if (!h) { if (!S.join) toast('Parti da un foro di una trave: è il pezzo che si sposta.'); return; }
+  if (!S.join) { S.join = { id: h.part.id, i: h.i }; view.setHighlight(h.part.id, true, 0x3a6fd8); updateHint(); return; }
+  const part = S.doc.parts.find((p) => p.id === S.join.id);
+  if (!part) { S.join = null; updateHint(); return; }
+  const r = joinResult(part, S.join.i, h);
+  pushUndo();
+  const held = S.doc.pins.filter((pin) => pinMembers(S.doc, pin).some((m) => m.kind === 'part' && m.part === part));
+  const items = moveSet(part.id, false);
+  if (fam(part) === r.n) {
+    const a = toWorld(r.n, part.x, part.z, part.layer), b = toWorld(r.n, r.x, r.z, r.layer);
+    for (const o of items) shiftItem(o, [b.x - a.x, b.y - a.y, b.z - a.z]);
+  } else {
+    // another plane: the beam is laid on it, its wheels follow hole by hole, its own pins are left behind
+    const ang = rad(part.angle);
+    for (const o of items) {
+      if (o === part) continue;
+      if (o.lo !== undefined) { S.doc.pins.splice(S.doc.pins.indexOf(o), 1); continue; }
+      const j = holeIndexAt(part, o.x, o.z), dl = o.layer - part.layer;
+      o.x = r.x + j * P * Math.cos(ang); o.z = r.z + j * P * Math.sin(ang); o.layer = r.layer + dl;
+      if (r.n === 'y') delete o.n; else o.n = r.n;
+    }
+    part.x = r.x; part.z = r.z; part.layer = r.layer;
+    if (r.n === 'y') delete part.n; else part.n = r.n;
+  }
+  // pins the beam has come off, and that now hold nothing, go away
+  for (const pin of held) if (S.doc.pins.includes(pin) && pinMembers(S.doc, pin).length < 2) S.doc.pins.splice(S.doc.pins.indexOf(pin), 1);
+  if (h.t !== 'shaft') ensurePin(r.n, h.x, h.z, Math.min(h.layer, r.layer), Math.max(h.layer, r.layer), 'hinge');
+  S.join = null;
+  commit();
+  updateHint();
+  toast(h.t === 'shaft' ? 'Montata sull\'albero: gira col servo.' : 'Unita con un perno libero. Con l\'attrezzo Perno un clic lo blocca o lo motorizza.');
 }
 
 function clickWheel(kind) {
@@ -838,13 +914,15 @@ function cancelDrafts() {
 }
 
 // ------------------------------------------------------------------ tools
-const TOOLS = ['select', 'block', 'beam', 'pin', 'servo', 'pulley', 'string', 'winch', 'erase', 'measure'];
+const TOOLS = ['select', 'block', 'beam', 'pin', 'servo', 'pulley', 'string', 'winch', 'erase', 'measure', 'join'];
 function setTool(t, silent) {
   if (S.mode === 'run' && t !== 'select') return;
   if (S.tool === 'string' && S.stringDraft && t !== 'string') finishString();
   S.tool = t;
   S.draw = null;
   S.blockDraft = null;
+  S.join = null;
+  typedReset();
   clearGhost();
   setHover(null);
   document.querySelectorAll('.tools button').forEach((b) => b.classList.toggle('active', b.dataset.tool === t));
@@ -972,7 +1050,7 @@ function updateMove(sx, sy) {
   const m = S.move;
   let d;
   if (m.axis) {
-    const t = snapP(axisParam(sx, sy, m.p0, m.axis));
+    const t = /\d/.test(S.typed.v) ? clamp(+S.typed.v, -200, 200) * P : snapP(axisParam(sx, sy, m.p0, m.axis));
     d = [m.axis.x * t, m.axis.y * t, m.axis.z * t].map((v) => Math.round(v));
   } else {
     const p = view.planeThrough(sx, sy, m.normal, m.p0);
@@ -1034,14 +1112,7 @@ function rotateSelected(deg) {
 canvas.addEventListener('pointermove', (e) => {
   if (S.resize) { updateResize(e.offsetX, e.offsetY); return; }
   if (S.move) { updateMove(e.offsetX, e.offsetY); return; }
-  if (S.blockDraft) {
-    const d = S.blockDraft;
-    const p = view.planeThrough(e.offsetX, e.offsetY, new THREE.Vector3(...d.normal), new THREE.Vector3(...d.a));
-    if (p) d.b = [p.x, p.y, p.z].map((v, k) => (d.normal[k] ? d.a[k] : clamp(snapP(v), d.a[k] - 39 * P, d.a[k] + 39 * P)));
-    d.b[2] = Math.max(P, d.b[2]);
-    updateGhost(e.offsetX, e.offsetY);
-    return;
-  }
+  if (S.blockDraft) { dragBlock(e.offsetX, e.offsetY); return; }
   if (S.drag) {
     const wp = view.planeThrough(e.offsetX, e.offsetY, S.drag.normal, S.drag.origin);
     if (wp) S.drag.target.copy(wp.multiplyScalar(0.001));
@@ -1051,7 +1122,21 @@ canvas.addEventListener('pointermove', (e) => {
   updateGhost(e.offsetX, e.offsetY);
 });
 
+function dragBlock(sx, sy) {
+  const d = S.blockDraft;
+  const p = view.planeThrough(sx, sy, new THREE.Vector3(...d.normal), new THREE.Vector3(...d.a));
+  if (p) d.b = [p.x, p.y, p.z].map((v, k) => (d.normal[k] ? d.a[k] : clamp(snapP(v), d.a[k] - 39 * P, d.a[k] + 39 * P)));
+  if (S.typed.v) {
+    // the typed length goes along the direction you are dragging
+    const ax = [0, 1, 2].filter((k) => !d.normal[k]).sort((i, j) => Math.abs(d.b[j] - d.a[j]) - Math.abs(d.b[i] - d.a[i]))[0];
+    d.b[ax] = d.a[ax] + (d.b[ax] < d.a[ax] ? -1 : 1) * (clamp(+S.typed.v, 1, 40) - 1) * P;
+  }
+  d.b[2] = Math.max(P, d.b[2]);
+  updateGhost(sx, sy);
+}
+
 canvas.addEventListener('pointerup', (e) => {
+  if (!S.draw) typedReset();
   if (S.drag) { S.drag = null; S.sim?.clearForces(); canvas.releasePointerCapture(e.pointerId); return; }
   if (S.resize) { const r = S.resize; S.resize = null; ghostLabels = []; if (r.undone) commit(); canvas.releasePointerCapture(e.pointerId); down = null; return; }
   if (S.move) { endMove(); canvas.releasePointerCapture(e.pointerId); down = null; return; }
@@ -1090,6 +1175,7 @@ function onClick(sx, sy, dbl, shift) {
     case 'string': clickString(dbl); break;
     case 'erase': eraseAt(sx, sy); break;
     case 'measure': clickMeasure(sx, sy); break;
+    case 'join': clickJoin(); break;
     case 'select': {
       const hit = view.pickObject(sx, sy);
       select(hit ? hit.id : null, shift);
@@ -1101,7 +1187,52 @@ function onClick(sx, sy, dbl, shift) {
 
 // ------------------------------------------------------------------ keyboard
 let lastMouse = null;
-canvas.addEventListener('pointermove', (e) => { lastMouse = { x: e.offsetX, y: e.offsetY }; });
+canvas.addEventListener('pointermove', (e) => { lastMouse = { x: e.offsetX, y: e.offsetY }; if (S.typed.v || S.typed.a) showTyped(); });
+
+// ---- typed dimensions: while you draw a beam or pull an arrow, a pad or a new block, type the
+// number of holes and press Enter, as in a CAD. For a beam, Tab switches to the angle.
+function numCtx() {
+  if (S.mode !== 'edit') return null;
+  return S.resize ? 'resize' : S.move?.axis ? 'move' : S.blockDraft ? 'block' : S.draw ? 'beam' : null;
+}
+function showTyped() {
+  const el = $('typed'), t = S.typed, ctx = numCtx();
+  el.hidden = !ctx || (!t.v && !t.a && !t.f);
+  if (el.hidden) return;
+  const box = (v, on, unit) => `<span class="${on ? 'on' : ''}">${v || '…'}</span>${unit}`;
+  el.innerHTML = (ctx === 'beam' ? box(t.v, t.f === 0, ' fori') + ' ' + box(t.a, t.f === 1, '°') : box(t.v, true, ' fori')) + '<small>Invio</small>';
+  const m = lastMouse || { x: 200, y: 200 };
+  el.style.left = `${m.x + 18}px`; el.style.top = `${m.y + 18}px`;
+}
+function typedReset() { if (!S.typed.v && !S.typed.a && !S.typed.f) return; S.typed = { v: '', a: '', f: 0 }; showTyped(); }
+function applyTyped() {
+  showTyped();
+  const m = lastMouse || (down && { x: down.x, y: down.y });
+  if (!m) return;
+  if (S.resize) updateResize(m.x, m.y); else if (S.move) updateMove(m.x, m.y); else if (S.blockDraft) dragBlock(m.x, m.y); else updateGhost(m.x, m.y);
+}
+function commitTyped() {
+  const ctx = numCtx();
+  if (ctx === 'beam') { if (lastMouse) updateGhost(lastMouse.x, lastMouse.y); clickBeam(); typedReset(); if (lastMouse) updateGhost(lastMouse.x, lastMouse.y); return; }
+  typedReset();
+  if (ctx === 'resize') { const r = S.resize; S.resize = null; ghostLabels = []; if (r.undone) commit(); }
+  else if (ctx === 'move') endMove();
+  else if (ctx === 'block') { placeBlock(); if (lastMouse) updateGhost(lastMouse.x, lastMouse.y); }
+  down = null;
+}
+// Returns true when the key was a typed dimension.
+function typedKey(e, k) {
+  const ctx = numCtx();
+  if (!ctx) return false;
+  const t = S.typed, f = ctx === 'beam' && t.f === 1 ? 'a' : 'v';
+  if (/^[0-9]$/.test(k)) { if (t[f].length < 4) t[f] += k; applyTyped(); return true; }
+  if (k === '-' && !t[f] && (f === 'a' || ctx === 'move')) { t[f] = '-'; showTyped(); return true; }
+  if (k === 'backspace' && (t.v || t.a)) { t[f] = t[f].slice(0, -1); applyTyped(); return true; }
+  if (k === 'tab' && ctx === 'beam') { e.preventDefault(); t.f = 1 - t.f; showTyped(); return true; }
+  if (k === 'enter') { commitTyped(); return true; }
+  if (k === 'escape' && (t.v || t.a || t.f)) { typedReset(); applyTyped(); return true; }
+  return false;
+}
 const NUDGE = { arrowleft: [-P, 0, 0], arrowright: [P, 0, 0], arrowup: [0, 0, P], arrowdown: [0, 0, -P], pageup: [0, P, 0], pagedown: [0, -P, 0] };
 window.addEventListener('keydown', (e) => {
   if (e.target.matches('input:not([type=checkbox]), select, textarea')) return;
@@ -1111,10 +1242,18 @@ window.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && k === 'd' && S.mode === 'edit') { e.preventDefault(); duplicateSelected(); return; }
   if ((e.ctrlKey || e.metaKey) && k === 'a' && S.mode === 'edit') { e.preventDefault(); setTool('select'); selectMany([...S.doc.parts, ...S.doc.pulleys, ...S.doc.winches].filter((o) => !S.hidden.has(o.id)).map((o) => o.id)); return; }
   if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (typedKey(e, k)) return;
+  if (k === 'tab' && S.mode === 'edit') {
+    // straight to the numbers of the selected piece
+    const f = $('inspector').querySelector('input[type=number]:not(:disabled)');
+    if (f) { e.preventDefault(); f.focus(); f.select(); }
+    return;
+  }
   if (k === 'escape') {
     if (S.stringDraft) { S.stringDraft = null; clearGhost(); updateHint(); }
     else if (S.draw || S.blockDraft) { S.draw = null; S.blockDraft = null; clearGhost(); updateHint(); }
     else if (S.measure) { S.measure = null; drawMeasure(); clearGhost(); }
+    else if (S.join) { view.setHighlight(S.join.id, false); S.join = null; clearGhost(); updateHint(); }
     else select(null);
     return;
   }
@@ -1129,7 +1268,7 @@ window.addEventListener('keydown', (e) => {
     if (S.selected !== null) { rotateSelected(e.shiftKey ? -15 : 15); return; }
   }
   if (/^[0-9]$/.test(k)) { setTool(TOOLS[(+k + 9) % 10]); return; }
-  const map = { v: 'select', c: 'block', b: 'beam', p: 'pin', m: 'servo', u: 'pulley', f: 'string', w: 'winch', x: 'erase', t: 'measure' };
+  const map = { v: 'select', c: 'block', b: 'beam', p: 'pin', m: 'servo', u: 'pulley', f: 'string', w: 'winch', x: 'erase', t: 'measure', j: 'join' };
   if (map[k]) setTool(map[k]);
 });
 
@@ -1307,7 +1446,7 @@ function startGizmo(g) {
 }
 function updateResize(sx, sy) {
   const r = S.resize, p = r.part, a = r.axis;
-  const n = clamp(r.s0[a] + Math.round(axisParam(sx, sy, r.p0, r.dir) / P), 1, 40);
+  const n = clamp(S.typed.v ? +S.typed.v : r.s0[a] + Math.round(axisParam(sx, sy, r.p0, r.dir) / P), 1, 40);
   if (n === p.s[a]) return;
   const was = { s: [...p.s], c: [...p.c] };
   if (!r.undone) { pushUndo(); r.undone = true; }
@@ -1482,6 +1621,29 @@ function syncSliders() {
     box.querySelector('[data-v]').textContent = w ? `gira ${fmt(v, 0)} mm` : `${fmt(v, 0)}°`;
   }
 }
+
+// Number fields of the panel: Enter confirms and gives the keyboard back to the scene, Tab confirms
+// and goes to the next field, the mouse wheel steps the value.
+$('panel').addEventListener('keydown', (e) => {
+  const t = e.target;
+  if (!t.matches('input[type=number]') || (e.key !== 'Enter' && e.key !== 'Tab')) return;
+  e.preventDefault();
+  const sel = 'input[type=number]:not(:disabled)';
+  const i = [...$('inspector').querySelectorAll(sel)].indexOf(t);
+  t.blur(); // fires change, which may redraw the inspector
+  if (e.key === 'Tab' && i >= 0) {
+    const list = [...$('inspector').querySelectorAll(sel)];
+    const n = list[(i + (e.shiftKey ? list.length - 1 : 1)) % list.length];
+    if (n) { n.focus(); n.select(); }
+  }
+});
+$('panel').addEventListener('wheel', (e) => {
+  const t = e.target;
+  if (!t.matches('input[type=number]') || t.disabled || S.mode !== 'edit') return;
+  e.preventDefault();
+  if (e.deltaY < 0) t.stepUp(); else t.stepDown();
+  t.dispatchEvent(new Event('change', { bubbles: true }));
+}, { passive: false });
 
 // ------------------------------------------------------------------ side panel
 function renderPanel() { renderControls(); renderSeq(); renderLegend(); renderInspector(); renderWarnings(); renderModel(); }

@@ -30,6 +30,8 @@ Idee prese dai CAD veri (SolidWorks e simili), ridotte a un clic.
 - **Ripeti**: N copie in fila a destra, in alto o verso di te, con il passo in fori. Vengono copiati anche perni, pulegge, verricelli e fili.
 - **Specchia**: la copia speculare (mano destra e mano sinistra), con i servo che girano al contrario.
 - **Duplica** (Ctrl+D) e **Nascondi** (H, Shift+H mostra tutto) per lavorare dentro un modello affollato.
+- **Numeri al volo, come in Fusion 360**: mentre disegni una trave scrivi i fori, Tab per l'angolo, Invio. Lo stesso mentre tiri una freccia, una piastrina o un blocco nuovo. Tab porta ai campi del pannello, Invio conferma e torna alla scena, la rotella cambia il valore.
+- **Unisci** (J): clicca un foro di una trave, poi il foro di destinazione. La trave ci va da sola, anche su un altro piano, e viene imperniata.
 - **Metro** (T): due clic e leggi la distanza in millimetri e in fori.
 - **Baricentro**: il punto giallo e il peso totale, per capire se il robot si ribalta.
 - **Distinta pezzi**: quanti pezzi di ogni tipo servono e quanto filo, scaricabile in CSV. Un clic su una riga seleziona quei pezzi.
