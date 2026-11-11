@@ -1683,7 +1683,9 @@ function renderSeq() {
     b.onclick = (e) => {
       if (e.target.classList.contains('x')) { poses.splice(i, 1); stopSeq(); markDirty(); renderSeq(); return; }
       stopSeq();
-      S.controls = clonePose(p); S.sim?.setControls(S.controls); renderControls(); markDirty();
+      S.controls = clonePose(p);
+      if (S.mode !== 'run') startSim();
+      S.sim?.setControls(S.controls); renderControls(); markDirty();
     };
     row.appendChild(b);
   });
@@ -1702,7 +1704,7 @@ function renderSeq() {
   } else {
     const p = document.createElement('p');
     p.className = 'empty';
-    p.textContent = 'Metti gli slider in una posizione e salvala. Con due o più pose il robot le ripete una dopo l\'altra.';
+    p.textContent = 'Muovi gli slider: il robot si mette in posizione. Quando ti piace premi Salva posa. Con due o più pose le ripete una dopo l\'altra.';
     el.appendChild(p);
   }
 }
@@ -1801,7 +1803,18 @@ function winchTravel(w) {
   return sp ? rad(sp.range) * w.r : Infinity;
 }
 
+// Moving a slider while building starts the simulation, so you see the position you are choosing.
+// The sliders are left alone meanwhile, or the one under the mouse would be torn away.
+function liveStart() {
+  if (S.mode === 'run') return;
+  S.keepCtl = true;
+  try { startSim(); } finally { S.keepCtl = false; }
+  if (S.mode !== 'run') return;
+  $('controls').querySelector('p.empty')?.remove();
+  toast('Simulazione avviata per mostrarti la posizione. Premi ■ per tornare a costruire.');
+}
 function renderControls() {
+  if (S.keepCtl) return;
   const el = $('controls');
   el.innerHTML = '';
   const doc = S.doc;
@@ -1834,7 +1847,7 @@ function renderControls() {
         <div class="row"><span class="val muted">forza max per filo</span><span class="val">${fmt(winchForce(it.w), 0)} N</span></div>
         <div class="note" data-n hidden></div>`;
       const r = box.querySelector('input');
-      r.oninput = () => { S.controls.winch[it.w.id] = +r.value; box.querySelector('[data-v]').textContent = `gira ${fmt(+r.value, 0)} mm`; S.sim?.setControls(S.controls); markDirty(); };
+      r.oninput = () => { liveStart(); S.controls.winch[it.w.id] = +r.value; box.querySelector('[data-v]').textContent = `gira ${fmt(+r.value, 0)} mm`; S.sim?.setControls(S.controls); markDirty(); };
       box.dataset.winch = it.w.id;
     } else {
       const o = it.o, sv = servoParams(o);
@@ -1846,7 +1859,7 @@ function renderControls() {
         <div class="row"><span class="val" data-t>coppia —</span><span class="val">max ${fmt(kgcm(sv.tmax), 1)} kg·cm</span></div>
         <div class="meter" data-m><i></i></div><div class="note" data-n hidden></div>`;
       const r = box.querySelector('input');
-      r.oninput = () => { S.controls.servo[o.id] = +r.value; box.querySelector('[data-v]').textContent = `${fmt(+r.value, 0)}°`; S.sim?.setControls(S.controls); markDirty(); };
+      r.oninput = () => { liveStart(); S.controls.servo[o.id] = +r.value; box.querySelector('[data-v]').textContent = `${fmt(+r.value, 0)}°`; S.sim?.setControls(S.controls); markDirty(); };
       box.onmouseenter = () => { if (S.selected !== o.id) view.setHighlight(o.id, true, 0x888888); };
       box.onmouseleave = () => { if (S.selected !== o.id) view.setHighlight(o.id, false); };
       box.dataset.pin = o.id;
