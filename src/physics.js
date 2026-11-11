@@ -52,28 +52,39 @@ export class Sim {
     this.limitType = mj.mjtConstraint.mjCNSTR_LIMIT_TENDON.value;
     this.time = 0;
     this.snaps = new Set(); // ids of strings seen jumping round a pulley
-    this.setControls({});
+    this.setControls({}, true);
     mj.mj_forward(this.model, this.data);
   }
 
-  // controls: { winch: {winchId: mm the drum has turned}, servo: {pinId: deg} }
+  // controls: { winch: {winchId: mm the drum has turned}, servo: {id: deg} }
   // A string that winds on the drum gets shorter by that much, one that unwinds gets longer.
-  setControls(c) {
+  // Motors with a known top speed (the standard servo models) travel towards the new target at
+  // that speed; the others jump to it.
+  setControls(c, instant = false) {
     const ctrl = this.data.ctrl;
+    this.target ||= new Map();
+    const set = (a, v, speed) => {
+      if (!speed || instant) { ctrl[a] = v; this.target.delete(a); } else this.target.set(a, { v, speed });
+    };
     for (const [sid, a] of Object.entries(this.actId)) {
       const info = this.meta.strings[sid];
       const turn = (c.winch?.[info.winch] ?? 0) / 1000;
-      ctrl[a] = Math.max(0, (this.lengths[sid] ?? 0) - info.wind * turn);
+      set(a, Math.max(0, (this.lengths[sid] ?? 0) - info.wind * turn), info.speed);
     }
-    for (const [pid, a] of Object.entries(this.servoId)) ctrl[a] = ((c.servo?.[pid] ?? 0) * Math.PI) / 180;
+    for (const [pid, a] of Object.entries(this.servoId)) set(a, ((c.servo?.[pid] ?? 0) * Math.PI) / 180, this.meta.servos[pid].speed);
   }
 
   step(seconds, drag) {
     const dt = this.model.opt.timestep;
     const n = Math.min(400, Math.max(1, Math.round(seconds / dt)));
     const L = this.data.ten_length, tids = Object.entries(this.tendonId).filter(([, t]) => t >= 0);
+    const ctrl = this.data.ctrl;
     for (let i = 0; i < n; i++) {
       if (drag) drag(this);
+      for (const [a, t] of this.target) {
+        const d = t.v - ctrl[a], lim = t.speed * dt;
+        ctrl[a] += Math.max(-lim, Math.min(lim, d));
+      }
       const before = tids.map(([, t]) => L[t]);
       mj.mj_step(this.model, this.data);
       // a string that jumps to the far side of a pulley changes length by millimetres in one
@@ -104,19 +115,22 @@ export class Sim {
       const o = obj[i];
       if (o >= 0 && k > 0 && obj[i - 1] === o) {
         // second tangent point on a pulley: draw the arc around its axis
-        const g = o;
+        const g = o, X = this.data.geom_xmat;
         const c = [this.data.geom_xpos[3 * g], this.data.geom_xpos[3 * g + 1], this.data.geom_xpos[3 * g + 2]];
+        const ax = [X[9 * g + 2], X[9 * g + 5], X[9 * g + 8]];
         const a = pts[pts.length - 1];
-        const a0 = Math.atan2(a[2] - c[2], a[0] - c[0]);
-        let a1 = Math.atan2(p[2] - c[2], p[0] - c[0]);
-        let d = a1 - a0;
-        while (d > Math.PI) d -= 2 * Math.PI;
-        while (d < -Math.PI) d += 2 * Math.PI;
-        const r = Math.hypot(a[0] - c[0], a[2] - c[2]);
+        const dot = (u, v) => u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+        const ra = [a[0] - c[0], a[1] - c[1], a[2] - c[2]], rp = [p[0] - c[0], p[1] - c[1], p[2] - c[2]];
+        const ha = dot(ra, ax), hp = dot(rp, ax);
+        const e1 = [ra[0] - ha * ax[0], ra[1] - ha * ax[1], ra[2] - ha * ax[2]];
+        const r = Math.hypot(...e1) || 1e-9;
+        e1[0] /= r; e1[1] /= r; e1[2] /= r;
+        const e2 = [ax[1] * e1[2] - ax[2] * e1[1], ax[2] * e1[0] - ax[0] * e1[2], ax[0] * e1[1] - ax[1] * e1[0]];
+        const d = Math.atan2(dot(rp, e2), dot(rp, e1)); // signed angle from a to p, the short way round
         const steps = Math.max(2, Math.ceil(Math.abs(d) / 0.2));
         for (let s = 1; s < steps; s++) {
-          const ang = a0 + (d * s) / steps;
-          pts.push([c[0] + r * Math.cos(ang), a[1] + ((p[1] - a[1]) * s) / steps, c[2] + r * Math.sin(ang)]);
+          const ang = (d * s) / steps, h = ha + ((hp - ha) * s) / steps, cs = Math.cos(ang) * r, sn = Math.sin(ang) * r;
+          pts.push([c[0] + cs * e1[0] + sn * e2[0] + h * ax[0], c[1] + cs * e1[1] + sn * e2[1] + h * ax[1], c[2] + cs * e1[2] + sn * e2[2] + h * ax[2]]);
           if (s === Math.floor(steps / 2)) pts.wraps.push(pts.length - 1);
         }
       }

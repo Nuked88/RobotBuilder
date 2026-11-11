@@ -5,10 +5,13 @@ import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer
 import { Line2 } from 'three/addons/lines/Line2.js';
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
-import { P, BEAM_W, HOLE_R, BOARD, LAYER, layerY, rad, holePos, pinMembers, mountOf, anchorPos, BEAM_COLORS, GUIDE_R, GUIDE_OFF } from './model.js';
+import {
+  P, BEAM_W, HOLE_R, BOARD, FLOOR, LAYER, pinMembers, mountOf, anchorPos, BEAM_COLORS, GUIDE_R, GUIDE_OFF, isBeam, isBlock, isServo,
+  fam, NVEC, toWorld, toFam, famQuat, partPose, docBounds, shaftMembers, servoSpec, servoLocalBox, SERVO_MODELS, SERVO_GAP, wheelWorld,
+} from './model.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
-const ROT = (a) => -rad(a); // beam angle -> rotation about +Y
+const setQuat = (o, q) => o.quaternion.set(q[1], q[2], q[3], q[0]); // [w, x, y, z] -> three
 
 export class View {
   constructor(container) {
@@ -73,22 +76,22 @@ export class View {
   }
 
   // Look at the board from the front, framing what has been built (or the middle of the board).
-  frontView(animate = true) {
-    const box = new THREE.Box3();
-    for (const p of this.doc?.parts || []) {
-      const e = holePos(p, p.holes - 1);
-      box.expandByPoint(new THREE.Vector3(p.x, 0, p.z));
-      box.expandByPoint(new THREE.Vector3(e.x, 0, e.z));
+  frontView(animate = true) { this.frame(new THREE.Vector3(0, -1, 0), animate); }
+  // Three-quarter view from above: the natural one for building with blocks.
+  isoView(animate = true) { this.frame(new THREE.Vector3(-0.6, -1, 0.72), animate); }
+
+  frame(dir, animate = true) {
+    const b = this.doc ? docBounds(this.doc) : null;
+    dir = dir.clone().normalize();
+    const front = Math.abs(dir.y) > 0.99;
+    const c = new THREE.Vector3(0, front ? -16 : -64, front ? 120 : 24);
+    let size = front ? 260 : 190;
+    if (b) {
+      c.set((b.min[0] + b.max[0]) / 2, (b.min[1] + b.max[1]) / 2, (b.min[2] + b.max[2]) / 2);
+      const sx = b.max[0] - b.min[0], sy = b.max[1] - b.min[1], sz = b.max[2] - b.min[2];
+      size = front ? Math.max(120, sx * 1.25, sz * 1.4) + 40 : Math.max(140, Math.hypot(sx, sy, sz) * 1.25) + 40;
     }
-    for (const w of [...(this.doc?.winches || []), ...(this.doc?.pulleys || [])]) box.expandByPoint(new THREE.Vector3(w.x, 0, w.z));
-    let c = new THREE.Vector3(0, 0, 120), size = 260;
-    if (!box.isEmpty()) {
-      box.getCenter(c);
-      const s = box.getSize(new THREE.Vector3());
-      size = Math.max(120, s.x * 1.25, s.z * 1.4) + 40;
-    }
-    const target = new THREE.Vector3(c.x, -16, c.z);
-    this.animateView(new THREE.Vector3(0, -1, 0), { target, size, animate });
+    this.animateView(dir, { target: c, size, animate });
   }
 
   // Distance that frames `size` mm in the perspective camera.
@@ -167,11 +170,12 @@ export class View {
   }
 
   buildBoard() {
-    const w = BOARD.x1 - BOARD.x0 + 2 * P, h = BOARD.z1 + P;
+    const w = BOARD.x1 - BOARD.x0 + 2 * P, h = BOARD.z1 + P - FLOOR.z;
     this.boardMat = new THREE.MeshStandardMaterial({ color: 0xe4e7ec, roughness: 0.85 });
     const board = new THREE.Mesh(new THREE.BoxGeometry(w, BEAM_W, h), this.boardMat);
-    board.position.set((BOARD.x0 + BOARD.x1) / 2, 0, h / 2);
+    board.position.set((BOARD.x0 + BOARD.x1) / 2, 0, FLOOR.z + h / 2);
     board.receiveShadow = true;
+    board.userData.surface = 'board';
     this.scene.add(board);
     this.holeMat = new THREE.MeshBasicMaterial({ color: 0xb4bac3 });
     const disc = new THREE.CircleGeometry(HOLE_R * 0.6, 16);
@@ -184,9 +188,29 @@ export class View {
       m.makeTranslation(BOARD.x0 + i * P, -BEAM_W / 2 - 0.05, BOARD.z0 + j * P);
       holes.setMatrixAt(k++, m);
     }
+    holes.raycast = () => {};
     this.scene.add(holes);
+    // baseplate in front of the wall: the ground to build up from
+    const depth = BEAM_W / 2 - (FLOOR.y0 - P);
+    const plate = new THREE.Mesh(new THREE.BoxGeometry(w, depth, P), this.boardMat);
+    plate.position.set((FLOOR.x0 + FLOOR.x1) / 2, BEAM_W / 2 - depth / 2, FLOOR.z - P / 2);
+    plate.receiveShadow = true;
+    plate.userData.surface = 'floor';
+    this.scene.add(plate);
+    const ny = Math.round((FLOOR.y1 - FLOOR.y0) / P) + 1;
+    const fholes = new THREE.InstancedMesh(new THREE.CircleGeometry(HOLE_R * 0.6, 16), this.holeMat, nx * ny);
+    k = 0;
+    for (let i = 0; i < nx; i++) for (let j = 0; j < ny; j++) {
+      m.makeTranslation(FLOOR.x0 + i * P, FLOOR.y0 + j * P, FLOOR.z + 0.05);
+      fholes.setMatrixAt(k++, m);
+    }
+    fholes.raycast = () => {};
+    this.scene.add(fholes);
+    this.surfaces = [board, plate];
     const floor = new THREE.Mesh(new THREE.PlaneGeometry(2000, 2000), new THREE.ShadowMaterial({ opacity: 0.18 }));
+    floor.position.z = FLOOR.z - P;
     floor.receiveShadow = true;
+    floor.raycast = () => {};
     this.scene.add(floor);
   }
 
@@ -229,25 +253,127 @@ export class View {
     return g;
   }
 
+  // A block: one box, each cell face drawn with its hole.
+  blockGeometry(s) {
+    this.blockGeo ||= new Map();
+    const key = s.join('x');
+    if (this.blockGeo.has(key)) return this.blockGeo.get(key);
+    const g = new THREE.BoxGeometry(s[0] * P - 0.3, s[1] * P - 0.3, s[2] * P - 0.3);
+    g.translate(((s[0] - 1) * P) / 2, ((s[1] - 1) * P) / 2, ((s[2] - 1) * P) / 2);
+    // faces come as +x -x +y -y +z -z: repeat the one-cell picture once per cell
+    const uv = g.attributes.uv, reps = [[s[2], s[1]], [s[2], s[1]], [s[0], s[2]], [s[0], s[2]], [s[0], s[1]], [s[0], s[1]]];
+    for (let f = 0; f < 6; f++) for (let v = 0; v < 4; v++) uv.setXY(f * 4 + v, uv.getX(f * 4 + v) * reps[f][0], uv.getY(f * 4 + v) * reps[f][1]);
+    g.userData.edges = new THREE.EdgesGeometry(g);
+    this.blockGeo.set(key, g);
+    return g;
+  }
+
+  blockTexture() {
+    if (this.blockTex) return this.blockTex;
+    const c = document.createElement('canvas');
+    c.width = c.height = 128;
+    const x = c.getContext('2d');
+    x.fillStyle = '#fff'; x.fillRect(0, 0, 128, 128);
+    x.strokeStyle = 'rgba(0,0,0,.16)'; x.lineWidth = 3; x.strokeRect(0, 0, 128, 128);
+    x.fillStyle = 'rgba(0,0,0,.42)'; x.beginPath(); x.arc(64, 64, 128 * (HOLE_R / P) * 0.92, 0, 7); x.fill();
+    x.strokeStyle = 'rgba(255,255,255,.55)'; x.lineWidth = 3; x.beginPath(); x.arc(64, 64, 128 * (HOLE_R / P) + 2, 0, 7); x.stroke();
+    const t = new THREE.CanvasTexture(c);
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.colorSpace = THREE.SRGBColorSpace;
+    t.anisotropy = 4;
+    return (this.blockTex = t);
+  }
+
+  labelTexture(text) {
+    this.labelTex ||= new Map();
+    if (this.labelTex.has(text)) return this.labelTex.get(text);
+    const c = document.createElement('canvas');
+    c.width = 256; c.height = 80;
+    const x = c.getContext('2d');
+    x.fillStyle = '#f4f5f7'; x.beginPath(); x.roundRect(2, 2, 252, 76, 12); x.fill();
+    x.fillStyle = '#16181c'; x.font = '700 46px Archivo, Arial, sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle';
+    x.fillText(text, 128, 43);
+    const t = new THREE.CanvasTexture(c);
+    t.colorSpace = THREE.SRGBColorSpace;
+    this.labelTex.set(text, t);
+    return t;
+  }
+
+  // The look of a servo in its own frame (shaft at the origin pointing along -y, case behind it).
+  // Returns the case and, apart, what turns with the shaft.
+  servoMeshes(part) {
+    const sp = servoSpec(part) || SERVO_MODELS.SG90, b = servoLocalBox(part);
+    const body = new THREE.Group(), horn = new THREE.Group();
+    const mat = new THREE.MeshStandardMaterial({ color: sp.color, roughness: 0.5 });
+    const topMat = new THREE.MeshStandardMaterial({ color: sp.top, roughness: 0.5 });
+    const box = new THREE.Mesh(new THREE.BoxGeometry(b.h[0] * 2, b.h[1] * 2, b.h[2] * 2), mat);
+    box.position.set(...b.c);
+    const tabs = new THREE.Mesh(new THREE.BoxGeometry(b.h[0] * 2 + sp.body[1] * 0.85, 2.4, b.h[2] * 2), mat);
+    tabs.position.set(b.c[0], b.c[1] - b.h[1] + 5.5, 0);
+    const boss = new THREE.Mesh(new THREE.CylinderGeometry(b.h[2] * 0.92, b.h[2] * 0.92, SERVO_GAP + 1.2, 28), topMat);
+    boss.position.set(0, b.c[1] - b.h[1] - (SERVO_GAP + 1.2) / 2 + 1.2, 0);
+    const cap = new THREE.Mesh(new THREE.BoxGeometry(b.h[0] * 2, 1.2, b.h[2] * 2), topMat);
+    cap.position.set(b.c[0], b.c[1] - b.h[1] + 0.6, 0);
+    body.add(box, tabs, cap, boss);
+    for (const side of [1, -1]) {
+      const lab = new THREE.Mesh(new THREE.PlaneGeometry(Math.min(b.h[0] * 1.5, 26), Math.min(b.h[0] * 1.5, 26) * 0.3125), new THREE.MeshBasicMaterial({ map: this.labelTexture(sp.name) }));
+      lab.position.set(b.c[0], b.c[1] + b.h[1] * 0.25, side * (b.h[2] + 0.06));
+      lab.rotation.set(0, side === 1 ? 0 : Math.PI, Math.PI);
+      lab.userData.flat = true;
+      body.add(lab);
+    }
+    const metal = new THREE.MeshStandardMaterial({ color: 0xd9dde3, roughness: 0.35, metalness: 0.4 });
+    const white = new THREE.MeshStandardMaterial({ color: 0xf4f5f7, roughness: 0.5 });
+    const shaft = new THREE.Mesh(new THREE.CylinderGeometry(HOLE_R * 0.88, HOLE_R * 0.88, LAYER + 2.4, 12), metal);
+    shaft.position.y = -0.2;
+    const disc = new THREE.Mesh(new THREE.CylinderGeometry(5.6, 5.6, 1.1, 28), white);
+    disc.position.y = LAYER / 2 + 0.55;
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(15, 1.1, 5), white);
+    arm.position.set(3, LAYER / 2 + 0.55, 0);
+    const screw = new THREE.Mesh(new THREE.CylinderGeometry(1.5, 1.5, 0.9, 12), new THREE.MeshStandardMaterial({ color: 0x2b2f36, roughness: 0.4 }));
+    screw.position.y = -LAYER / 2 - 1.5;
+    horn.add(shaft, disc, arm, screw);
+    return { body, horn, mat };
+  }
+
   // ---------------------------------------------------------------- document
   rebuild(doc) {
     this.doc = doc;
     for (const o of this.objects.values()) o.group.removeFromParent();
     this.objects.clear();
+    const horns = [];
     for (const p of doc.parts) {
       const g = new THREE.Group();
-      const mat = new THREE.MeshStandardMaterial({ color: p.color || BEAM_COLORS[(p.layer - 1) % BEAM_COLORS.length], roughness: 0.45, metalness: 0.0 });
-      const mesh = new THREE.Mesh(this.beamGeometry(p.holes), mat);
-      mesh.castShadow = true; mesh.receiveShadow = true;
-      mesh.userData = { id: p.id, kind: 'part' };
-      g.add(mesh);
-      const guides = new THREE.Mesh(this.guideGeometry(p.holes), mat);
-      guides.castShadow = true;
-      guides.userData = { id: p.id, kind: 'part' };
-      g.add(guides);
-      this.placeBeam(g, p);
+      let mat;
+      if (isBlock(p)) {
+        mat = new THREE.MeshStandardMaterial({ color: p.color || BEAM_COLORS[1], roughness: 0.55, map: this.blockTexture() });
+        const geo = this.blockGeometry(p.s);
+        g.add(new THREE.Mesh(geo, mat));
+        const edges = new THREE.LineSegments(geo.userData.edges, this.edgeMat ||= new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.28 }));
+        edges.raycast = () => {};
+        g.add(edges);
+      } else if (isServo(p)) {
+        const sm = this.servoMeshes(p);
+        mat = sm.mat;
+        g.add(sm.body);
+        horns.push([p, sm.horn]);
+      } else {
+        mat = new THREE.MeshStandardMaterial({ color: p.color || BEAM_COLORS[(p.layer - 1) % BEAM_COLORS.length], roughness: 0.45, metalness: 0.0 });
+        g.add(new THREE.Mesh(this.beamGeometry(p.holes), mat), new THREE.Mesh(this.guideGeometry(p.holes), mat));
+      }
+      g.traverse((m) => { if (m.isMesh) { m.castShadow = !m.userData.flat; m.receiveShadow = true; m.userData.id = p.id; m.userData.kind = 'part'; } });
+      this.placePart(g, p);
       this.world.add(g);
-      this.objects.set(p.id, { group: g, kind: 'part', mesh, mat, home: g });
+      this.objects.set(p.id, { group: g, kind: 'part', mat, home: g });
+    }
+    // what turns with a servo shaft rides on the first piece it drives
+    for (const [p, horn] of horns) {
+      horn.traverse((m) => { if (m.isMesh) { m.castShadow = true; m.userData.id = p.id; m.userData.kind = 'part'; } });
+      const pose = partPose(p);
+      horn.position.set(...pose.pos);
+      setQuat(horn, pose.quat);
+      const drives = shaftMembers(doc, p)[0];
+      (drives ? this.objects.get(drives.id).group : this.objects.get(p.id).group).attach(horn);
     }
     for (const pin of doc.pins) this.objects.set(pin.id, { kind: 'pin', ...this.makePin(pin) });
     for (const pul of doc.pulleys) this.objects.set(pul.id, { kind: 'pulley', ...this.makeWheel(pul, 'pulley') });
@@ -284,9 +410,10 @@ export class View {
     }
   }
 
-  placeBeam(g, p) {
-    g.position.set(p.x, layerY(p.layer), p.z);
-    g.quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), ROT(p.angle));
+  placePart(g, p) {
+    const pose = partPose(p);
+    g.position.set(...pose.pos);
+    setQuat(g, pose.quat);
   }
 
   // Pins/pulleys/winches ride on the front-most part they touch (so they follow it in the simulation).
@@ -299,17 +426,11 @@ export class View {
     return mt.kind === 'part' ? mt.part : null;
   }
 
+  // Put obj (already oriented for the world) at a world position, riding on carrier if there is one.
   attach(obj, carrier, worldPos) {
-    if (carrier) {
-      const home = this.objects.get(carrier.id).group;
-      const local = new THREE.Vector3(worldPos.x - carrier.x, 0, worldPos.z - carrier.z).applyAxisAngle(new THREE.Vector3(0, 1, 0), -ROT(carrier.angle));
-      local.y = worldPos.y - layerY(carrier.layer);
-      obj.position.copy(local);
-      home.add(obj);
-    } else {
-      obj.position.set(worldPos.x, worldPos.y, worldPos.z);
-      this.world.add(obj);
-    }
+    obj.position.set(worldPos.x, worldPos.y, worldPos.z);
+    if (carrier) this.objects.get(carrier.id).group.attach(obj);
+    else this.world.add(obj);
   }
 
   makePin(pin) {
@@ -331,9 +452,9 @@ export class View {
       g.add(body);
     }
     g.traverse((o) => { if (o.isMesh) o.userData = { id: pin.id, kind: 'pin' }; });
-    const yMid = (layerY(lo) + layerY(hi)) / 2;
+    setQuat(g, famQuat(fam(pin)));
     const carrier = this.carrierFor({ kind: 'pinmem', pin });
-    this.attach(g, carrier, { x: pin.x, y: yMid, z: pin.z });
+    this.attach(g, carrier, toWorld(fam(pin), pin.x, pin.z, (lo + hi) / 2));
     return { group: g, mat };
   }
 
@@ -367,8 +488,9 @@ export class View {
       g.userData.mat = mat;
     }
     g.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.userData = { id: item.id, kind }; } });
+    setQuat(g, famQuat(fam(item), 0, item.dir || 1));
     const carrier = this.carrierFor(item);
-    this.attach(g, carrier, { x: item.x, y: layerY(item.layer), z: item.z });
+    this.attach(g, carrier, wheelWorld(item));
     return { group: g, mat: g.userData.mat };
   }
 
@@ -577,7 +699,7 @@ export class View {
   }
 
   resetPose() {
-    for (const p of this.doc.parts) { const o = this.objects.get(p.id); if (o) this.placeBeam(o.group, p); }
+    for (const p of this.doc.parts) { const o = this.objects.get(p.id); if (o) this.placePart(o.group, p); }
   }
 
   setHighlight(id, on, color = 0xffffff) {
@@ -627,10 +749,43 @@ export class View {
 
   // Intersection of the mouse ray with the plane y = Y.
   planePoint(sx, sy, Y) {
+    return this.planeThrough(sx, sy, new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, Y, 0));
+  }
+
+  // Intersection of the mouse ray with the plane through `point` with the given normal.
+  planeThrough(sx, sy, normal, point) {
     const rc = this.ray(sx, sy);
-    const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -Y);
+    const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, point);
     const out = new THREE.Vector3();
     return rc.ray.intersectPlane(plane, out) ? out : null;
+  }
+
+  // Where the mouse ray meets layer `layer` of family n, in the coordinates of that family.
+  famPoint(sx, sy, n, layer) {
+    const N = new THREE.Vector3(...NVEC[n]);
+    const w = this.planeThrough(sx, sy, N, N.clone().multiplyScalar(layer * LAYER));
+    return w ? toFam(n, w) : null;
+  }
+
+  // Unit vector from a world point towards the eye.
+  toEye(p) {
+    if (this.camera === this.ortho) return this.camera.getWorldDirection(new THREE.Vector3()).negate();
+    return this.camera.position.clone().sub(new THREE.Vector3(p.x, p.y, p.z)).normalize();
+  }
+  // +1 when the eye is on the side layers of family n grow towards, seen from p; else -1.
+  facing(n, p) {
+    const N = NVEC[n], e = this.toEye(p);
+    return e.x * N[0] + e.y * N[1] + e.z * N[2] >= 0 ? 1 : -1;
+  }
+
+  // First solid thing under the cursor (a piece, the wall or the baseplate), with the face normal.
+  pickSurface(sx, sy) {
+    const rc = this.ray(sx, sy);
+    const hits = rc.intersectObjects([this.world, ...this.surfaces], true).filter((h) => h.object.isMesh && h.face && (h.object.userData.id !== undefined || h.object.userData.surface));
+    const h = hits[0];
+    if (!h) return { ray: rc.ray, distance: Infinity };
+    const normal = h.face.normal.clone().transformDirection(h.object.matrixWorld);
+    return { ray: rc.ray, distance: h.distance, point: h.point, normal, id: h.object.userData.id, kind: h.object.userData.kind, surface: h.object.userData.surface };
   }
 
   pickObject(sx, sy) {

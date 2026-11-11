@@ -2,11 +2,14 @@ import './style.css';
 import { View, THREE, stringColor } from './scene.js';
 import { ViewCube } from './viewcube.js';
 import { initPhysics, Sim } from './physics.js';
-import { fingerDemo, fingerBeltDemo } from './demo.js';
+import { fingerDemo, fingerBeltDemo, armDemo } from './demo.js';
 import { openStore, lastProjectId, setLastProjectId, saveFile } from './storage.js';
+import { servoParams } from './mjcf.js';
 import {
-  P, BEAM_W, LAYER, layerY, rad, emptyDoc, holePos, holeIndexAt, onGrid, snapGrid, topLayerAt, layerBehind, holeAt,
-  pinAt, pinMembers, findById, prune, BEAM_COLORS, PIN_LABEL, STRING_LABEL, BOARD, EPS, guidePos, anchorPos, mountOf,
+  P, BEAM_W, LAYER, rad, emptyDoc, holePos, holeAt, layerBehind, pinAt, pinMembers, findById, prune, BEAM_COLORS, BLOCK_COLORS, PIN_LABEL,
+  STRING_LABEL, BOARD, FLOOR, EPS, guidePos, anchorPos, mountOf, fam, NVEC, toWorld, toFam, famQuat, isBeam, isBlock, isServo, holeWorld,
+  guideWorld, wheelWorld, worldToLocal, partPose, SERVO_MODELS, servoSpec, PULLEY_SIZES, winchForce, solidBox, boxesOverlap, glueLinks,
+  shaftMembers, shiftItem, partLabel,
 } from './model.js';
 
 const $ = (id) => document.getElementById(id);
@@ -18,11 +21,16 @@ const S = {
   projectId: null,
   projectName: 'Progetto senza nome',
   undo: [], redo: [],
-  tool: 'beam',
+  tool: 'block',
   pinType: 'hinge',
   stringKind: 'string',
   layerMode: 'auto',
-  draw: null,          // beam being drawn: {start:{x,z,base}, layer}
+  blockColor: BLOCK_COLORS[0],
+  servoModel: 'SG90',
+  servoAngle: 0,
+  pulleyR: 6,
+  draw: null,          // beam being drawn: {n, start:{x,z,base}, layer, sgn}
+  blockDraft: null,    // block being stretched: {a, b, normal}
   stringDraft: null,   // {kind, anchors}
   hover: null,
   selected: null,      // id
@@ -43,10 +51,13 @@ let store = null;
 
 // ------------------------------------------------------------------ hint strip
 const HINTS = {
-  select: '<b>Trascina</b> una trave per spostarla (con <b>Shift</b> sposti tutto quello che è imperniato con lei). <b>Clicca</b> un pezzo o un filo per modificarlo a destra. <b>R</b> ruota la trave selezionata. In simulazione trascinando spingi i pezzi.',
-  beam0: 'Clicca un <b>foro</b> (della tavola o di una trave) dove inizia la trave.',
+  select: '<b>Trascina</b> un pezzo per spostarlo (con <b>Shift</b> sposti tutto quello che gli è attaccato). <b>Frecce</b> e <b>Pag↑/Pag↓</b> lo spostano di un foro, <b>R</b> lo ruota, <b>Ctrl+D</b> lo duplica. In simulazione trascinando spingi i pezzi.',
+  block: '<b>Clicca una faccia</b> (pavimento, muro o un altro pezzo) per appoggiarci un blocco. <b>Trascina</b> per farne uno lungo o una piastra. <b>Clic destro</b> lo toglie. I blocchi che si toccano restano incollati.',
+  block1: 'Rilascia per posare il blocco. <b>Esc</b> annulla.',
+  beam0: 'Clicca un <b>foro</b> dove inizia la trave: del muro, del pavimento, di una trave o di un blocco. La trave si stende sul piano della faccia che clicchi.',
   beam1: 'Muovi il mouse e clicca dove finisce. Ogni nuova trave nasce <b>imperniata</b> al foro di partenza. <b>Esc</b> per finire.',
   pin: 'Clicca un foro per metterci un perno: unisce il pezzo con quello che c\'è dietro. Clicca un perno esistente per <b>cambiarne il tipo</b>.',
+  servo: 'Clicca un foro per montarci il <b>servo</b>: l\'albero esce verso di te. <b>R</b> gira il corpo. Poi appoggia una trave o un blocco sull\'albero: è quello che il servo fa girare.',
   pulley: 'Clicca un foro per montarci una <b>puleggia</b>: il filo ci gira attorno e cambia direzione.',
   string0: 'Clicca il punto di partenza del filo: un <b>verricello</b> (filo motorizzato) o un foro.',
   string1: 'Clicca i fori, gli <b>occhielli</b> ai lati delle travi e le pulegge da cui passa. Sulla puleggia, clicca <b>dal lato</b> in cui vuoi il filo. Doppio clic o <b>Invio</b> per chiudere, <b>Esc</b> per annullare.',
@@ -59,6 +70,7 @@ function updateHint() {
   let k = S.tool;
   if (S.mode === 'run') k = 'run';
   else if (S.tool === 'beam') k = S.draw ? 'beam1' : 'beam0';
+  else if (S.tool === 'block') k = S.blockDraft ? 'block1' : 'block';
   else if (S.tool === 'string') k = S.stringDraft?.replaceId != null && !S.stringDraft.anchors.length ? 'reroute' : S.stringDraft ? 'string1' : 'string0';
   $('hint').innerHTML = HINTS[k] || '';
 }
@@ -141,7 +153,7 @@ async function loadProject(p) {
   S.selected = null;
   cancelDrafts();
   view.rebuild(S.doc);
-  view.frontView(false);
+  resetView(false);
   if (S.doc.parts.length) { setTool('select', true); updateHint(); }
   schedulePreview();
   renderPanel();
@@ -149,6 +161,12 @@ async function loadProject(p) {
   setLastProjectId(p.id);
   $('chkGravity').checked = S.doc.settings?.gravity !== false;
   $('saveState').textContent = store?.remote ? 'Salvato sul server' : 'Salvato in questo browser';
+}
+
+// Flat designs on the wall open from the front, anything built in space from three quarters.
+const isFlat = (doc) => doc.parts.every((p) => isBeam(p) && fam(p) === 'y');
+function resetView(animate) {
+  if (S.doc.parts.length && isFlat(S.doc)) view.frontView(animate); else view.isoView(animate);
 }
 
 function migrate(doc) {
@@ -169,7 +187,7 @@ function newProject(doc = emptyDoc(), name = 'Progetto senza nome') {
   S.selected = null;
   cancelDrafts();
   view.rebuild(S.doc);
-  view.frontView(S.doc.parts.length > 0);
+  resetView(S.doc.parts.length > 0);
   if (S.doc.parts.length) { setTool('select', true); updateHint(); }
   schedulePreview();
   renderPanel();
@@ -224,7 +242,8 @@ function drawStrings() {
       if (p) { const mm = p.map((q) => q.map((v) => v * 1000)); mm.wraps = p.wraps; paths.set(s.id, mm); }
       if (S.mode === 'run') tensions[s.id] = sim.tension(s.id);
       const w = s.anchors.find((a) => a.t === 'winch');
-      s.fmaxRef = w ? (S.doc.winches.find((x) => x.id === w.id)?.fmax ?? 10) : 3;
+      const wo = w && S.doc.winches.find((x) => x.id === w.id);
+      s.fmaxRef = wo ? winchForce(wo) : 3;
     }
   }
   view.syncStrings(paths, tensions, S.mode === 'run' ? sim : null);
@@ -296,62 +315,108 @@ function dragForce(sim) {
 }
 
 // ------------------------------------------------------------------ hover targets
-// Finds what is under the cursor: a winch/pulley, a hole of a part, or a hole of the board.
+const snapP = (v) => Math.round(v / P) * P;
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const famTag = (o, n) => { if (n !== 'y') o.n = n; return o; };
+
+// Centre of the visible face of a hole: its lattice point pushed half a beam towards the eye side.
+function facePoint(n, x, z, layer, sgn, extra = 0) {
+  const w = toWorld(n, x, z, layer), N = NVEC[n], k = sgn * (BEAM_W / 2 + extra);
+  return { x: w.x + N[0] * k, y: w.y + N[1] * k, z: w.z + N[2] * k };
+}
+
+// Finds the "socket" under the cursor: a hole of a beam, a cell face of a block, a hole of the wall
+// or of the baseplate, and (for strings) wheels and eyelets. A socket says which family it belongs
+// to (n), where it is in that family (x, z, layer) and which side you are looking at it from (sgn):
+// new pieces go on layer + sgn. Only what is actually visible counts, like pointing at it.
 function hoverTarget(sx, sy, opts = {}) {
   const doc = S.doc;
-  let best = null;
+  const surf = view.pickSurface(sx, sy);
+  const o = surf.ray.origin, dr = surf.ray.direction;
+  const depthOf = (p) => (p.x - o.x) * dr.x + (p.y - o.y) * dr.y + (p.z - o.z) * dr.z;
+  const famOk = (n) => !opts.fam || opts.fam === n;
+
+  let wheel = null;
   if (opts.wheels) {
-    for (const [arr, t] of [[doc.winches, 'winch'], [doc.pulleys, 'pulley']]) {
-      for (const w of arr) {
-        const c = view.project({ x: w.x, y: layerY(w.layer), z: w.z });
-        const e = view.project({ x: w.x + w.r, y: layerY(w.layer), z: w.z });
-        const rpx = Math.hypot(e.x - c.x, e.y - c.y);
+    for (const [list, t] of [[doc.winches, 'winch'], [doc.pulleys, 'pulley']]) {
+      for (const w of list) {
+        const n = fam(w), cw = wheelWorld(w);
+        if (depthOf(cw) > surf.distance + w.r + 6) continue;
+        const c = view.project(cw);
+        const e1 = view.project(toWorld(n, w.x + w.r, w.z, w.layer)), e2 = view.project(toWorld(n, w.x, w.z + w.r, w.layer));
+        const rpx = Math.max(Math.hypot(e1.x - c.x, e1.y - c.y), Math.hypot(e2.x - c.x, e2.y - c.y));
         const d = Math.hypot(sx - c.x, sy - c.y);
-        if (d < rpx * 1.08 + 2 && (!best || d < best.d)) {
-          const wp = view.planePoint(sx, sy, layerY(w.layer));
+        if (d < rpx * 1.08 + 2 && (!wheel || d < wheel.d)) {
+          const fp = view.famPoint(sx, sy, n, w.layer);
           let sxv = 1, szv = 0;
-          if (wp) { const L = Math.hypot(wp.x - w.x, wp.z - w.z) || 1; sxv = (wp.x - w.x) / L; szv = (wp.z - w.z) / L; }
-          best = { t, id: w.id, x: w.x, z: w.z, layer: w.layer, d, sx: sxv, sz: szv };
+          if (fp) { const L = Math.hypot(fp.x - w.x, fp.z - w.z) || 1; sxv = (fp.x - w.x) / L; szv = (fp.z - w.z) / L; }
+          wheel = { t, id: w.id, n, x: w.x, z: w.z, layer: w.layer, sgn: w.dir || 1, d, sx: sxv, sz: szv };
         }
       }
     }
   }
-  const wheel = best;
-  best = null;
+
+  let best = null;
+  const consider = (cand, p, lim) => {
+    const s = view.project(p);
+    const d = Math.hypot(sx - s.x, sy - s.y);
+    if (d >= lim) return;
+    const depth = depthOf(p);
+    if (depth > surf.distance + 6) return; // hidden behind something
+    if (!best || d < best.d - 3 || (Math.abs(d - best.d) <= 3 && depth < best.depth)) best = { ...cand, d, depth };
+  };
   for (const part of doc.parts) {
-    for (let i = 0; i < part.holes; i++) {
-      const h = holePos(part, i);
-      const s = view.project({ x: h.x, y: layerY(part.layer) - BEAM_W / 2, z: h.z });
-      const d = Math.hypot(sx - s.x, sy - s.y);
-      if (d < 13 && (!best || d < best.d - 3 || (Math.abs(d - best.d) <= 3 && part.layer > best.layer))) best = { t: 'hole', part, i, x: h.x, z: h.z, layer: part.layer, d };
-    }
-  }
-  // cable guides on the beam sides: they win when the cursor is closer to them than to the hole
-  if (opts.guides) {
-    let g = null;
-    for (const part of doc.parts) {
+    if (isBeam(part)) {
+      const n = fam(part);
+      if (!famOk(n)) continue;
+      const sgn = view.facing(n, holeWorld(part, 0));
       for (let i = 0; i < part.holes; i++) {
-        for (const side of [1, -1]) {
+        const h = holePos(part, i);
+        consider({ t: 'hole', part, i, n, x: h.x, z: h.z, layer: part.layer, sgn }, facePoint(n, h.x, h.z, part.layer, sgn), 13);
+        if (opts.guides) for (const side of [1, -1]) {
           const q = guidePos(part, i, side);
-          const s = view.project({ x: q.x, y: layerY(part.layer) - BEAM_W / 2, z: q.z });
-          const d = Math.hypot(sx - s.x, sy - s.y);
-          if (d < 9 && (!g || d < g.d - 2 || (Math.abs(d - g.d) <= 2 && part.layer > g.layer))) g = { t: 'guide', part, i, side, x: q.x, z: q.z, layer: part.layer, d };
+          consider({ t: 'guide', part, i, side, n, x: q.x, z: q.z, layer: part.layer, sgn }, facePoint(n, q.x, q.z, part.layer, sgn), 9);
         }
       }
+    } else if (isServo(part) && opts.shafts !== false) {
+      const n = fam(part), dir = part.dir || 1;
+      if (famOk(n)) consider({ t: 'shaft', servo: part, n, x: part.x, z: part.z, layer: part.layer - dir, sgn: dir }, facePoint(n, part.x, part.z, part.layer, dir), 12);
     }
-    if (g && (!best || g.d < best.d)) best = g;
   }
   // a wheel wins unless the cursor sits right on a hole
   if (wheel && !(best && best.d < 5 && best.d < wheel.d)) return wheel;
   if (best) return best;
-  if (opts.board !== false) {
-    const wp = view.planePoint(sx, sy, -BEAM_W / 2);
-    if (wp && wp.x > BOARD.x0 - P && wp.x < BOARD.x1 + P && wp.z > BOARD.z0 - P && wp.z < BOARD.z1 + P) {
-      const g = snapGrid(wp.x, wp.z);
-      const s = view.project({ x: g.x, y: -BEAM_W / 2, z: g.z });
-      const d = Math.hypot(sx - s.x, sy - s.y);
-      if (d < 16) return { t: 'board', x: g.x, z: g.z, layer: 0, d };
-    }
+  if (!surf.point) return null;
+
+  const pt = surf.point, nr = surf.normal;
+  if (surf.surface === 'board') {
+    if (nr.y > -0.5 || !famOk('y')) return null;
+    return { t: 'board', n: 'y', x: clamp(snapP(pt.x), BOARD.x0, BOARD.x1), z: clamp(snapP(pt.z), BOARD.z0, BOARD.z1), layer: 0, sgn: 1, d: 0 };
+  }
+  if (surf.surface === 'floor') {
+    if (nr.z < 0.5 || !famOk('z')) return null;
+    return { t: 'floor', n: 'z', x: clamp(snapP(pt.x), FLOOR.x0, FLOOR.x1), z: clamp(snapP(pt.y), FLOOR.y0, FLOOR.y1), layer: 0, sgn: 1, d: 0 };
+  }
+  const part = doc.parts.find((p) => p.id === surf.id);
+  if (!part) return null;
+  if (isBlock(part)) {
+    // the cell face you point at: a hole along the axis of that face
+    const a = [Math.abs(nr.x), Math.abs(nr.y), Math.abs(nr.z)];
+    const k = a[0] > a[1] && a[0] > a[2] ? 0 : a[1] > a[2] ? 1 : 2;
+    const n = 'xyz'[k];
+    if (!famOk(n)) return null;
+    const side = Math.sign([nr.x, nr.y, nr.z][k]) || 1;
+    const p = [pt.x, pt.y, pt.z];
+    const cell = p.map((v, j) => part.c[j] + clamp(Math.round((v - (j === k ? side * P / 2 : 0) - part.c[j]) / P), 0, part.s[j] - 1) * P);
+    const f = toFam(n, { x: cell[0], y: cell[1], z: cell[2] });
+    return { t: 'hole', part, i: -1, n, x: f.x, z: f.z, layer: Math.round(f.layer), sgn: side * NVEC[n][k], d: 0, cell };
+  }
+  if (isBeam(part) && famOk(fam(part))) {
+    // pointing at a beam between two holes: take the nearer one
+    const n = fam(part), f = toFam(n, pt), a = rad(part.angle);
+    const i = clamp(Math.round(((f.x - part.x) * Math.cos(a) + (f.z - part.z) * Math.sin(a)) / P), 0, part.holes - 1);
+    const h = holePos(part, i);
+    return { t: 'hole', part, i, n, x: h.x, z: h.z, layer: part.layer, sgn: view.facing(n, pt), d: 0 };
   }
   return null;
 }
@@ -364,74 +429,168 @@ ringGeo.rotateX(Math.PI / 2);
 function HOLE() { return 3.6; }
 const ringMat = new THREE.MeshBasicMaterial({ color: 0xf2b51c, depthTest: false, transparent: true });
 const ghostBeamMat = new THREE.MeshStandardMaterial({ color: 0xf2b51c, transparent: true, opacity: 0.55, depthWrite: false });
+const ghostBadMat = new THREE.MeshStandardMaterial({ color: 0xff3b30, transparent: true, opacity: 0.45, depthWrite: false });
 const ghostLineMat = new THREE.LineDashedMaterial({ color: 0xf2b51c, dashSize: 3, gapSize: 2, depthTest: false });
+const unitBox = new THREE.BoxGeometry(1, 1, 1);
+const unitEdges = new THREE.LineSegments(new THREE.EdgesGeometry(unitBox), new THREE.LineBasicMaterial({ color: 0x231a00, transparent: true, opacity: 0.6 }));
+const wheelGeo = new Map();
+const servoGhosts = new Map();
+const setQ = (obj, q) => obj.quaternion.set(q[1], q[2], q[3], q[0]);
 
-function clearGhost() { ghost.clear(); }
-function ring(x, y, z, scale = 1) {
+let ghostLabels = [];
+function clearGhost() { ghost.clear(); ghostLabels = []; }
+// Ring round a socket, lying on the face you are looking at.
+function ring(h, scale = 1) {
   const m = new THREE.Mesh(ringGeo, ringMat);
-  m.position.set(x, y, z);
+  const p = facePoint(h.n, h.x, h.z, h.layer, h.sgn, 0.4);
+  m.position.set(p.x, p.y, p.z);
+  setQ(m, famQuat(h.n));
   m.scale.setScalar(scale);
   m.renderOrder = 10;
   ghost.add(m);
 }
-let ghostLabels = [];
-function showGhostLabels(items) { ghostLabels = items; }
+
+// Box of cells from a to b (lattice points, any order): {c: first cell, s: size in cells}.
+function cellBox(a, b) {
+  const c = a.map((v, k) => Math.min(v, b[k]));
+  return { c, s: a.map((v, k) => Math.round(Math.abs(v - b[k]) / P) + 1) };
+}
+// Is there already a solid piece where this one would go?
+function blocked(part, exceptId = null) {
+  const box = solidBox(part);
+  if (box.min[2] < FLOOR.z - 0.5) return true;
+  return S.doc.parts.some((p) => p.id !== exceptId && !isBeam(p) && boxesOverlap(box, solidBox(p)));
+}
+// The cell a new block would take when you point at a face.
+function blockCellAt(sx, sy) {
+  const s = view.pickSurface(sx, sy);
+  if (!s.point) return null;
+  const a = [Math.abs(s.normal.x), Math.abs(s.normal.y), Math.abs(s.normal.z)];
+  const k = a[0] > a[1] && a[0] > a[2] ? 0 : a[1] > a[2] ? 1 : 2;
+  const normal = [0, 0, 0];
+  normal[k] = Math.sign([s.normal.x, s.normal.y, s.normal.z][k]) || 1;
+  const p = [s.point.x, s.point.y, s.point.z].map((v, j) => snapP(v + normal[j] * P / 2));
+  p[2] = Math.max(P, p[2]);
+  return { c: p, normal };
+}
+function ghostBlock(box) {
+  const bad = blocked({ type: 'block', ...box });
+  const m = new THREE.Mesh(unitBox, bad ? ghostBadMat : ghostBeamMat);
+  m.scale.set(box.s[0] * P, box.s[1] * P, box.s[2] * P);
+  m.position.set(box.c[0] + (box.s[0] - 1) * P / 2, box.c[1] + (box.s[1] - 1) * P / 2, box.c[2] + (box.s[2] - 1) * P / 2);
+  const e = unitEdges.clone();
+  e.scale.copy(m.scale); e.position.copy(m.position);
+  ghost.add(m, e);
+  if (box.s.some((v) => v > 1)) ghostLabels.push({ text: `${box.s[0]}×${box.s[1]}×${box.s[2]}`, pos: [m.position.x, m.position.y, m.position.z + box.s[2] * P / 2 + 3], cls: 'ghost' });
+  return !bad;
+}
+
+// The servo that clicking this socket would mount: case on the face, shaft pointing out.
+function servoCandidate(h) {
+  const sp = SERVO_MODELS[S.servoModel];
+  const s = famTag({ type: 'servo', model: S.servoModel, x: h.x, z: h.z, layer: h.layer + h.sgn * (sp.layers + 1), angle: S.servoAngle }, h.n);
+  if (h.sgn < 0) s.dir = -1;
+  return s;
+}
+function ghostServo(cand) {
+  const bad = blocked(cand);
+  const key = cand.model + (bad ? '!' : '');
+  let g = servoGhosts.get(key);
+  if (!g) {
+    const sm = view.servoMeshes(cand);
+    g = new THREE.Group();
+    g.add(sm.body, sm.horn);
+    g.traverse((m) => {
+      if (!m.isMesh) return;
+      m.material = m.material.clone();
+      m.material.transparent = true; m.material.opacity = 0.62; m.material.depthWrite = false;
+      if (bad) m.material.color.set(0xff3b30);
+    });
+    servoGhosts.set(key, g);
+  }
+  const pose = partPose(cand);
+  g.position.set(...pose.pos);
+  setQ(g, pose.quat);
+  ghost.add(g);
+  return !bad;
+}
 
 function updateGhost(sx, sy) {
   clearGhost();
   ghostLabels = [];
   if (S.mode === 'run') return;
   const tool = S.tool;
-  if (tool === 'beam') {
+  if (tool === 'block') {
+    if (S.blockDraft) { S.blockDraft.ok = ghostBlock(cellBox(S.blockDraft.a, S.blockDraft.b)); return; }
+    const c = blockCellAt(sx, sy);
+    S.hoverCell = c;
+    if (c) ghostBlock(cellBox(c.c, c.c));
+  } else if (tool === 'beam') {
     if (!S.draw) {
       const h = hoverTarget(sx, sy);
       S.hover = h;
-      if (h) ring(h.x, layerY(h.layer) - BEAM_W / 2 - 0.4, h.z);
+      if (h) ring(h);
     } else {
       const end = beamEndFor(sx, sy);
       S.draw.end = end;
       if (end) {
+        const { n, layer, start } = S.draw;
         const len = end.n * P;
-        const g = view.beamGeometry(end.n + 1);
-        const mesh = new THREE.Mesh(g, ghostBeamMat);
-        mesh.position.set(S.draw.start.x, layerY(S.draw.layer), S.draw.start.z);
-        mesh.rotation.y = -rad(end.angle);
+        const mesh = new THREE.Mesh(view.beamGeometry(end.n + 1), ghostBeamMat);
+        const w = toWorld(n, start.x, start.z, layer);
+        mesh.position.set(w.x, w.y, w.z);
+        setQ(mesh, famQuat(n, end.angle));
         ghost.add(mesh);
-        ring(end.x, layerY(S.draw.layer) - BEAM_W / 2 - 0.4, end.z, end.snapped ? 1.2 : 0.9);
+        ring({ n, x: end.x, z: end.z, layer, sgn: S.draw.sgn }, end.snapped ? 1.2 : 0.9);
         const a = ((end.angle % 360) + 360) % 360;
-        ghostLabels.push({ text: `${end.n + 1} fori · ${fmt(a > 180 ? a - 360 : a, 0)}°${end.snapped ? ' · aggancio' : ''}`, pos: [S.draw.start.x + (len / 2) * Math.cos(rad(end.angle)), layerY(S.draw.layer) - 6, S.draw.start.z + (len / 2) * Math.sin(rad(end.angle))], cls: 'ghost' });
+        const mid = facePoint(n, start.x + (len / 2) * Math.cos(rad(end.angle)), start.z + (len / 2) * Math.sin(rad(end.angle)), layer, S.draw.sgn, 3);
+        ghostLabels.push({ text: `${end.n + 1} fori · ${fmt(a > 180 ? a - 360 : a, 0)}°${end.snapped ? ' · aggancio' : ''}`, pos: [mid.x, mid.y, mid.z], cls: 'ghost' });
       }
     }
   } else if (tool === 'pin' || tool === 'pulley' || tool === 'winch') {
-    const h = hoverTarget(sx, sy);
+    const h = hoverTarget(sx, sy, { shafts: false });
     S.hover = h;
     if (h) {
-      ring(h.x, layerY(h.layer) - BEAM_W / 2 - 0.4, h.z);
+      ring(h);
       if (tool !== 'pin') {
-        const r = tool === 'winch' ? 8 : 6;
-        const c = new THREE.Mesh(new THREE.CylinderGeometry(r, r, BEAM_W - 1, 28), ghostBeamMat);
-        c.position.set(h.x, layerY(h.layer + 1), h.z);
+        const r = tool === 'winch' ? 8 : S.pulleyR;
+        if (!wheelGeo.has(r)) wheelGeo.set(r, new THREE.CylinderGeometry(r, r, BEAM_W - 1, 28));
+        const c = new THREE.Mesh(wheelGeo.get(r), ghostBeamMat);
+        const w = toWorld(h.n, h.x, h.z, h.layer + h.sgn);
+        c.position.set(w.x, w.y, w.z);
+        setQ(c, famQuat(h.n));
         ghost.add(c);
       } else {
-        const ex = pinAt(S.doc, h.x, h.z, h.layer);
-        if (ex) ghostLabels.push({ text: `${PIN_LABEL[ex.type]} → ${PIN_LABEL[nextPinType(ex.type)]}`, pos: [h.x, layerY(h.layer) - 8, h.z + 6], cls: 'ghost' });
+        const ex = pinAt(S.doc, h.n, h.x, h.z, h.layer);
+        const p = facePoint(h.n, h.x, h.z, h.layer, h.sgn, 5);
+        if (ex) ghostLabels.push({ text: `${PIN_LABEL[ex.type]} → ${PIN_LABEL[nextPinType(ex.type)]}`, pos: [p.x, p.y, p.z], cls: 'ghost' });
       }
     }
+  } else if (tool === 'servo') {
+    const h = hoverTarget(sx, sy, { shafts: false });
+    S.hover = h;
+    S.servoCand = null;
+    if (h) {
+      const cand = servoCandidate(h);
+      ring(h);
+      if (ghostServo(cand)) S.servoCand = cand;
+      const sp = SERVO_MODELS[cand.model], top = toWorld(cand.n || 'y', cand.x, cand.z, cand.layer + (cand.dir || 1));
+      ghostLabels.push({ text: `${sp.name} · ${fmt(sp.kgcm, 1)} kg·cm`, pos: [top.x, top.y, top.z], cls: 'ghost' });
+    }
   } else if (tool === 'string') {
-    const h = hoverTarget(sx, sy, { wheels: true, guides: true });
+    const h = hoverTarget(sx, sy, { wheels: true, guides: true, shafts: false });
     S.hover = h;
     const pts = [];
-    if (S.stringDraft) for (const a of S.stringDraft.anchors) pts.push(anchorPoint(a));
+    if (S.stringDraft) for (const a of S.stringDraft.anchors) { const p = anchorPos(S.doc, a); if (p) pts.push(p); }
     if (h) {
       const a = targetToAnchor(h);
-      if (a) {
-        const p = anchorPoint(a);
+      const p = a && anchorPos(S.doc, a);
+      if (p) {
         pts.push(p);
         if (h.t === 'pulley' || h.t === 'winch') {
           const w = (h.t === 'pulley' ? S.doc.pulleys : S.doc.winches).find((e) => e.id === h.id);
-          ring(w.x, layerY(w.layer) - BEAM_W / 2, w.z, (w.r + 1.5) / HOLE());
-        } else if (h.t === 'guide') ring(h.x, layerY(h.layer) - BEAM_W / 2 - 0.4, h.z, 0.6);
-        else ring(h.x, layerY(h.layer) - BEAM_W / 2 - 0.4, h.z);
+          ring({ ...h, sgn: view.facing(h.n, p) }, (w.r + 1.5) / HOLE());
+        } else ring(h, h.t === 'guide' ? 0.6 : 1);
       }
     }
     if (pts.length >= 2) {
@@ -456,38 +615,31 @@ function setHover(id) {
 }
 
 function beamEndFor(sx, sy) {
-  const st = S.draw.start;
-  const wp = view.planePoint(sx, sy, layerY(S.draw.layer));
+  const st = S.draw.start, n = S.draw.n;
+  const wp = view.famPoint(sx, sy, n, S.draw.layer);
   if (!wp) return null;
   // snap to an existing hole at a whole number of pitches from the start
-  const h = hoverTarget(sx, sy);
+  const h = hoverTarget(sx, sy, { fam: n, shafts: false });
   if (h && !(Math.abs(h.x - st.x) < EPS && Math.abs(h.z - st.z) < EPS)) {
     const dist = Math.hypot(h.x - st.x, h.z - st.z);
-    const n = Math.round(dist / P);
-    if (n >= 1 && n <= 24 && Math.abs(dist - n * P) < 0.35) {
-      return { x: h.x, z: h.z, n, angle: (Math.atan2(h.z - st.z, h.x - st.x) * 180) / Math.PI, snapped: h.t === 'hole' ? h : null };
+    const k = Math.round(dist / P);
+    if (k >= 1 && k <= 24 && Math.abs(dist - k * P) < 0.35) {
+      return { x: h.x, z: h.z, n: k, angle: (Math.atan2(h.z - st.z, h.x - st.x) * 180) / Math.PI, snapped: h.t === 'hole' ? h : null };
     }
   }
   const dx = wp.x - st.x, dz = wp.z - st.z;
-  const n = Math.max(1, Math.min(24, Math.round(Math.hypot(dx, dz) / P)));
+  const k = Math.max(1, Math.min(24, Math.round(Math.hypot(dx, dz) / P)));
   const angle = Math.round((Math.atan2(dz, dx) * 180) / Math.PI / 15) * 15;
-  return { x: st.x + n * P * Math.cos(rad(angle)), z: st.z + n * P * Math.sin(rad(angle)), n, angle, snapped: null };
-}
-
-function anchorPoint(a) {
-  const doc = S.doc;
-  if (a.t === 'hole') { const p = doc.parts.find((e) => e.id === a.part); const h = holePos(p, a.i); return { x: h.x, y: layerY(p.layer), z: h.z }; }
-  if (a.t === 'guide') return anchorPos(doc, a);
-  if (a.t === 'board') return { x: a.x, y: -BEAM_W / 2, z: a.z };
-  if (a.t === 'pulley') { const p = doc.pulleys.find((e) => e.id === a.id); return { x: p.x + a.sx * p.r, y: layerY(p.layer), z: p.z + a.sz * p.r }; }
-  if (a.t === 'winch') { const w = doc.winches.find((e) => e.id === a.id); return { x: w.x, y: layerY(w.layer), z: w.z }; }
+  return { x: st.x + k * P * Math.cos(rad(angle)), z: st.z + k * P * Math.sin(rad(angle)), n: k, angle, snapped: null };
 }
 
 function targetToAnchor(h) {
   if (!h) return null;
-  if (h.t === 'hole') return { t: 'hole', part: h.part.id, i: h.i };
+  if (h.t === 'hole' && h.i >= 0) return { t: 'hole', part: h.part.id, i: h.i };
+  if (h.t === 'hole') return { t: 'pt', part: h.part.id, p: worldToLocal(h.part, facePoint(h.n, h.x, h.z, h.layer, h.sgn, P / 2 - BEAM_W / 2)).map((v) => +v.toFixed(3)) };
   if (h.t === 'guide') return { t: 'guide', part: h.part.id, i: h.i, side: h.side };
   if (h.t === 'board') return { t: 'board', x: h.x, z: h.z };
+  if (h.t === 'floor') return { t: 'world', p: [h.x, h.z, FLOOR.z] };
   if (h.t === 'pulley') return { t: 'pulley', id: h.id, sx: h.sx, sz: h.sz };
   if (h.t === 'winch') return { t: 'winch', id: h.id };
   return null;
@@ -495,12 +647,12 @@ function targetToAnchor(h) {
 
 // ------------------------------------------------------------------ actions
 const nextPinType = (t) => ({ hinge: 'weld', weld: 'servo', servo: 'hinge' }[t]);
-const layerColor = (L) => BEAM_COLORS[(L - 1) % BEAM_COLORS.length];
+const layerColor = (L) => BEAM_COLORS[(((L - 1) % BEAM_COLORS.length) + BEAM_COLORS.length) % BEAM_COLORS.length];
 
-function ensurePin(x, z, lo, hi, type = 'hinge') {
-  const ex = S.doc.pins.find((p) => Math.abs(p.x - x) < EPS && Math.abs(p.z - z) < EPS && p.hi >= lo - 1 && p.lo <= hi + 1);
+function ensurePin(n, x, z, lo, hi, type = 'hinge') {
+  const ex = S.doc.pins.find((p) => fam(p) === n && Math.abs(p.x - x) < EPS && Math.abs(p.z - z) < EPS && p.hi >= lo - 1 && p.lo <= hi + 1);
   if (ex) { ex.lo = Math.min(ex.lo, lo); ex.hi = Math.max(ex.hi, hi); return ex; }
-  const pin = { id: S.doc.nextId++, x, z, lo, hi, type };
+  const pin = famTag({ id: S.doc.nextId++, x, z, lo, hi, type }, n);
   S.doc.pins.push(pin);
   return pin;
 }
@@ -509,29 +661,25 @@ function clickBeam() {
   if (!S.draw) {
     const h = S.hover;
     if (!h) return;
-    const base = h.layer;
-    let layer = S.layerMode === 'auto' ? base + 1 : +S.layerMode;
-    if (S.layerMode === 'auto' && h.t === 'board') layer = Math.max(1, topLayerAt(S.doc, h.x, h.z) + 1);
-    S.draw = { start: { x: h.x, z: h.z, base: h.t === 'board' ? 0 : base, onPart: h.t === 'hole' }, layer };
+    let layer = h.layer + h.sgn;
+    if (S.layerMode !== 'auto' && h.n === 'y') layer = +S.layerMode;
+    S.draw = { n: h.n, start: { x: h.x, z: h.z, base: h.layer, shaft: h.t === 'shaft' }, layer, sgn: h.sgn };
     updateHint();
     return;
   }
   const end = S.draw.end;
   if (!end) return;
   pushUndo();
-  const st = S.draw.start;
-  const part = { id: S.doc.nextId++, type: 'beam', x: st.x, z: st.z, angle: +end.angle.toFixed(4), holes: end.n + 1, layer: S.draw.layer, color: layerColor(S.draw.layer) };
+  const { start: st, n, layer, sgn } = S.draw;
+  const part = famTag({ id: S.doc.nextId++, type: 'beam', x: st.x, z: st.z, angle: +end.angle.toFixed(4), holes: end.n + 1, layer, color: layerColor(layer) }, n);
   S.doc.parts.push(part);
-  // pin at the start: joins the new beam to whatever it was started from
-  if (S.draw.layer !== st.base) ensurePin(st.x, st.z, Math.min(st.base, S.draw.layer), Math.max(st.base, S.draw.layer), 'hinge');
-  // pin at the end if it landed on another beam's hole
-  if (end.snapped && end.snapped.t === 'hole' && end.snapped.layer !== part.layer) {
-    ensurePin(end.x, end.z, Math.min(end.snapped.layer, part.layer), Math.max(end.snapped.layer, part.layer), 'hinge');
-  }
+  // pin at the start: joins the new beam to whatever it was started from (a servo shaft needs none)
+  if (!st.shaft && layer !== st.base) ensurePin(n, st.x, st.z, Math.min(st.base, layer), Math.max(st.base, layer), 'hinge');
+  // pin at the end if it landed on another piece's hole
+  if (end.snapped && end.snapped.layer !== layer) ensurePin(n, end.x, end.z, Math.min(end.snapped.layer, layer), Math.max(end.snapped.layer, layer), 'hinge');
   commit();
   // keep drawing: the next beam starts from this one's end, one layer forward
-  const nextLayer = S.layerMode === 'auto' ? part.layer + 1 : part.layer;
-  S.draw = { start: { x: end.x, z: end.z, base: part.layer, onPart: true }, layer: nextLayer };
+  S.draw = { n, start: { x: end.x, z: end.z, base: layer }, layer: S.layerMode === 'auto' ? layer + sgn : layer, sgn };
   if (end.snapped) S.draw = null; // closed a loop: stop chaining
   updateHint();
 }
@@ -540,17 +688,17 @@ function clickPin() {
   const h = S.hover;
   if (!h) return;
   pushUndo();
-  const ex = pinAt(S.doc, h.x, h.z, h.layer);
+  const ex = pinAt(S.doc, h.n, h.x, h.z, h.layer);
   if (ex) {
     ex.type = nextPinType(ex.type);
     toast(PIN_LABEL[ex.type]);
   } else {
-    let lo = h.t === 'board' ? 0 : layerBehind(S.doc, h.x, h.z, h.layer);
-    let hi = h.layer;
-    if (h.t === 'board') hi = 1;
-    if (lo < 0) { lo = h.layer; hi = h.layer + 1; }
-    const pin = { id: S.doc.nextId++, x: h.x, z: h.z, lo, hi, type: S.pinType };
-    S.doc.pins.push(pin);
+    let a = h.layer, b = h.layer + h.sgn; // nothing behind: the pin sticks out, ready for the next piece
+    if (h.t !== 'board' && h.t !== 'floor') {
+      const behind = layerBehind(S.doc, h.n, h.x, h.z, h.layer, h.sgn, h.part);
+      if (behind !== null) b = behind;
+    }
+    S.doc.pins.push(famTag({ id: S.doc.nextId++, x: h.x, z: h.z, lo: Math.min(a, b), hi: Math.max(a, b), type: S.pinType }, h.n));
   }
   commit();
 }
@@ -559,10 +707,33 @@ function clickWheel(kind) {
   const h = S.hover;
   if (!h) return;
   pushUndo();
-  const item = { id: S.doc.nextId++, x: h.x, z: h.z, layer: h.layer + 1, r: kind === 'winch' ? 8 : 6 };
+  const item = famTag({ id: S.doc.nextId++, x: h.x, z: h.z, layer: h.layer + h.sgn, r: kind === 'winch' ? 8 : S.pulleyR }, h.n);
+  if (h.sgn < 0) item.dir = -1;
   if (kind === 'winch') { item.fmax = 10; S.doc.winches.push(item); } else S.doc.pulleys.push(item);
   commit();
   if (kind === 'winch') toast('Verricello montato. Ora scegli Filo e parti da qui.');
+}
+
+function clickServo() {
+  const cand = S.servoCand;
+  if (!cand) { if (S.hover) toast('Qui il servo non ci sta: c\'è già un altro pezzo.'); return; }
+  pushUndo();
+  const s = { id: S.doc.nextId++, ...cand };
+  S.doc.parts.push(s);
+  commit();
+  toast(`${s.model} montato. Appoggia una trave o un blocco sul suo albero.`);
+}
+
+function placeBlock() {
+  const d = S.blockDraft;
+  S.blockDraft = null;
+  updateHint();
+  if (!d) return;
+  const box = cellBox(d.a, d.b);
+  if (blocked({ type: 'block', ...box })) { toast('Lì c\'è già un altro pezzo.'); return; }
+  pushUndo();
+  S.doc.parts.push({ id: S.doc.nextId++, type: 'block', c: box.c, s: box.s, color: S.blockColor });
+  commit();
 }
 
 function clickString(dbl) {
@@ -586,7 +757,13 @@ function clickString(dbl) {
   updateHint();
 }
 function sameAnchor(a, b) {
-  return a && b && a.t === b.t && (a.t === 'hole' ? a.part === b.part && a.i === b.i : a.t === 'guide' ? a.part === b.part && a.i === b.i && a.side === b.side : a.t === 'board' ? a.x === b.x && a.z === b.z : a.id === b.id);
+  if (!a || !b || a.t !== b.t) return false;
+  if (a.t === 'hole') return a.part === b.part && a.i === b.i;
+  if (a.t === 'guide') return a.part === b.part && a.i === b.i && a.side === b.side;
+  if (a.t === 'board') return a.x === b.x && a.z === b.z;
+  if (a.t === 'pt') return a.part === b.part && a.p.every((v, k) => Math.abs(v - b.p[k]) < 0.5);
+  if (a.t === 'world') return a.p.every((v, k) => Math.abs(v - b.p[k]) < 0.5);
+  return a.id === b.id;
 }
 function finishString() {
   const d = S.stringDraft;
@@ -605,9 +782,10 @@ function finishString() {
   updateHint();
 }
 
-function eraseAt(sx, sy) {
+function eraseAt(sx, sy, onlySolids = false) {
   const hit = view.pickObject(sx, sy);
   if (!hit) return;
+  if (onlySolids) { const p = S.doc.parts.find((e) => e.id === hit.id); if (!p || isBeam(p)) return; }
   pushUndo();
   removeObject(hit.id);
   hoverId = null;
@@ -619,8 +797,7 @@ function removeObject(id) {
   const doc = S.doc;
   if (f.coll === 'parts') {
     // pulleys/winches mounted on it go too
-    const p = f.obj;
-    const mounted = (it) => it.layer === p.layer + 1 && holeIndexAt(p, it.x, it.z) >= 0;
+    const mounted = (it) => { const m = mountOf(doc, it); return m.kind === 'part' && m.part === f.obj; };
     doc.pulleys = doc.pulleys.filter((it) => !mounted(it));
     doc.winches = doc.winches.filter((it) => !mounted(it));
   }
@@ -629,17 +806,20 @@ function removeObject(id) {
 
 function cancelDrafts() {
   S.draw = null;
+  S.blockDraft = null;
   S.stringDraft = null;
   clearGhost();
   updateHint();
 }
 
 // ------------------------------------------------------------------ tools
+const TOOLS = ['select', 'block', 'beam', 'pin', 'servo', 'pulley', 'string', 'winch', 'erase'];
 function setTool(t, silent) {
   if (S.mode === 'run' && t !== 'select') return;
   if (S.tool === 'string' && S.stringDraft && t !== 'string') finishString();
   S.tool = t;
   S.draw = null;
+  S.blockDraft = null;
   clearGhost();
   setHover(null);
   document.querySelectorAll('.tools button').forEach((b) => b.classList.toggle('active', b.dataset.tool === t));
@@ -653,19 +833,33 @@ function renderSubtools() {
   const el = $('subtools');
   el.innerHTML = '';
   if (S.mode === 'run') { el.hidden = true; return; }
-  const seg = (label, opts, cur, onPick) => {
-    const l = document.createElement('span'); l.className = 'lbl'; l.textContent = label; el.appendChild(l);
-    for (const [v, txt] of opts) {
+  const label = (txt) => { const l = document.createElement('span'); l.className = 'lbl'; l.textContent = txt; el.appendChild(l); };
+  const seg = (lbl, opts, cur, onPick) => {
+    label(lbl);
+    for (const [v, txt, sub] of opts) {
       const b = document.createElement('button');
-      b.textContent = txt;
-      b.className = cur === v ? 'on' : '';
+      b.innerHTML = sub ? `<b>${txt}</b><small>${sub}</small>` : txt;
+      b.className = (cur === v ? 'on' : '') + (sub ? ' card2' : '');
       b.onclick = () => { onPick(v); renderSubtools(); };
       el.appendChild(b);
     }
   };
-  if (S.tool === 'pin') seg('Tipo', [['hinge', 'Liscio · ruota'], ['weld', 'A croce · bloccato'], ['servo', 'Servo · motore']], S.pinType, (v) => (S.pinType = v));
+  if (S.tool === 'pin') seg('Tipo', [['hinge', 'Liscio · ruota'], ['weld', 'A croce · bloccato'], ['servo', 'Motore generico']], S.pinType, (v) => (S.pinType = v));
   else if (S.tool === 'string') seg('Tipo', [['string', 'Filo · non si allunga'], ['elastic', 'Elastico · richiama']], S.stringKind, (v) => { S.stringKind = v; if (S.stringDraft) S.stringDraft.kind = v; });
-  else if (S.tool === 'beam') seg('Strato', [['auto', 'Automatico'], ['1', '1'], ['2', '2'], ['3', '3'], ['4', '4'], ['5', '5']], S.layerMode, (v) => (S.layerMode = v));
+  else if (S.tool === 'beam') seg('Strato sul muro', [['auto', 'Automatico'], ['1', '1'], ['2', '2'], ['3', '3'], ['4', '4'], ['5', '5']], S.layerMode, (v) => (S.layerMode = v));
+  else if (S.tool === 'servo') seg('Modello', Object.values(SERVO_MODELS).map((m) => [m.name, m.name, `${fmt(m.kgcm, 1)} kg·cm · ${fmt(m.mass * 1000, 0)} g`]), S.servoModel, (v) => (S.servoModel = v));
+  else if (S.tool === 'pulley') seg('Misura', PULLEY_SIZES.map(([r, t]) => [r, t + ' mm']), S.pulleyR, (v) => (S.pulleyR = v));
+  else if (S.tool === 'block') {
+    label('Colore');
+    for (const c of BLOCK_COLORS) {
+      const b = document.createElement('button');
+      b.className = 'sw' + (S.blockColor === c ? ' on' : '');
+      b.style.background = c;
+      b.title = 'Colore dei nuovi blocchi'; b.setAttribute('aria-label', 'Colore ' + c);
+      b.onclick = () => { S.blockColor = c; renderSubtools(); };
+      el.appendChild(b);
+    }
+  }
   el.hidden = !el.children.length;
 }
 
@@ -675,82 +869,86 @@ let down = null;
 canvas.addEventListener('pointerdown', (e) => {
   down = { x: e.offsetX, y: e.offsetY, b: e.button, t: performance.now() };
   if (e.button !== 0) return;
-  // left drag on empty space orbits when nothing else wants it
+  view.controls.mouseButtons.LEFT = null;
+  if (S.mode === 'edit' && S.tool === 'block') {
+    // press on a face: a block starts there; dragging stretches it along that face
+    const c = blockCellAt(e.offsetX, e.offsetY);
+    if (c) { S.blockDraft = { a: c.c, b: c.c, normal: c.normal }; canvas.setPointerCapture(e.pointerId); updateHint(); updateGhost(e.offsetX, e.offsetY); }
+    return;
+  }
   const hit = S.tool === 'select' ? view.pickObject(e.offsetX, e.offsetY) : null;
   if (S.mode === 'run' && hit && hit.kind === 'part' && hit.point) {
     const pose = S.sim.bodyPose(hit.id);
+    if (!pose) return;
     const q = new THREE.Quaternion(pose.quat[1], pose.quat[2], pose.quat[3], pose.quat[0]);
     const pm = hit.point.clone().multiplyScalar(0.001);
     const local = pm.clone().sub(new THREE.Vector3(...pose.pos)).applyQuaternion(q.invert());
-    S.drag = { partId: hit.id, local, target: pm.clone(), planeY: hit.point.y };
-    view.controls.mouseButtons.LEFT = null;
+    // pull in the plane that faces you, through the point you grabbed
+    S.drag = { partId: hit.id, local, target: pm.clone(), normal: view.toEye(hit.point), origin: hit.point.clone() };
     canvas.setPointerCapture(e.pointerId);
     return;
   }
   if (S.mode === 'edit' && hit && hit.kind === 'part' && hit.point) {
     startMove(hit.id, e.shiftKey, e.offsetX, e.offsetY);
-    view.controls.mouseButtons.LEFT = null;
     canvas.setPointerCapture(e.pointerId);
     return;
   }
+  // left drag on empty space orbits when nothing else wants it
   view.controls.mouseButtons.LEFT = S.tool === 'select' && !hit ? THREE.MOUSE.ROTATE : null;
 }, { capture: true });
 
-// ---- moving beams in the editor: grab one and drop it on the grid. Pins used only by what is
-// being moved come along (so a beam pinned to the board stays pinned at its new place); pins shared
-// with other parts stay, so the beam comes off them. Holes dropped onto an existing pin join it.
-function startMove(partId, group, sx, sy) {
+// ---- moving pieces in the editor: grab one and drop it on the lattice. A beam slides in its own
+// plane, a block or a servo along the face you grab it by. Pins used only by what is being moved
+// come along (so a beam pinned to the board stays pinned at its new place); pins shared with other
+// parts stay, so the piece comes off them. Holes dropped onto an existing pin join it.
+function moveSet(partId, group) {
   const doc = S.doc;
   const ids = new Set([partId]);
   if (group) {
-    // everything pinned to it, board excluded
+    // everything pinned, glued or geared to it, the fixed base excluded
+    const glue = glueLinks(doc).filter(([a, b]) => a !== 'G' && b !== 'G');
+    for (const s of doc.parts) if (isServo(s)) for (const m of shaftMembers(doc, s)) glue.push([s.id, m.id]);
     for (let grown = true; grown;) {
       grown = false;
       for (const pin of doc.pins) {
         const mem = pinMembers(doc, pin).filter((m) => m.kind === 'part').map((m) => m.part.id);
         if (mem.some((id) => ids.has(id)) && mem.some((id) => !ids.has(id))) { mem.forEach((id) => ids.add(id)); grown = true; }
       }
+      for (const [a, b] of glue) if (ids.has(a) !== ids.has(b)) { ids.add(a); ids.add(b); grown = true; }
     }
   }
-  const part = doc.parts.find((p) => p.id === partId);
   const pins = doc.pins.filter((pin) => { const mem = pinMembers(doc, pin).filter((m) => m.kind === 'part'); return mem.length && mem.every((m) => ids.has(m.part.id)); });
   const wheels = [...doc.pulleys, ...doc.winches].filter((w) => { const m = mountOf(doc, w); return m.kind === 'part' && ids.has(m.part.id); });
-  const items = [...doc.parts.filter((p) => ids.has(p.id)), ...pins, ...wheels];
-  const p0 = view.planePoint(sx, sy, layerY(part.layer));
-  if (!p0) return;
-  S.move = { p0, items, orig: items.map((o) => ({ x: o.x, z: o.z })), dx: 0, dz: 0, undone: false, selectId: partId };
+  return [...doc.parts.filter((p) => ids.has(p.id)), ...pins, ...wheels];
+}
+const coordsOf = (o) => ({ x: o.x, z: o.z, layer: o.layer, lo: o.lo, hi: o.hi, c: o.c && [...o.c] });
+function restoreCoords(o, c) { for (const k of Object.keys(c)) if (c[k] !== undefined) o[k] = Array.isArray(c[k]) ? [...c[k]] : c[k]; }
+
+function startMove(partId, group, sx, sy) {
+  const part = S.doc.parts.find((p) => p.id === partId);
+  const surf = view.pickSurface(sx, sy);
+  if (!part || !surf.point) return;
+  const items = moveSet(partId, group);
+  let normal = new THREE.Vector3(...NVEC[fam(part)]);
+  if (!isBeam(part)) {
+    const a = [Math.abs(surf.normal.x), Math.abs(surf.normal.y), Math.abs(surf.normal.z)];
+    const k = a[0] > a[1] && a[0] > a[2] ? 0 : a[1] > a[2] ? 1 : 2;
+    normal = new THREE.Vector3(k === 0 ? 1 : 0, k === 1 ? 1 : 0, k === 2 ? 1 : 0);
+  }
+  S.move = { p0: surf.point.clone(), normal, items, orig: items.map(coordsOf), d: [0, 0, 0], undone: false, selectId: partId };
 }
 function updateMove(sx, sy) {
   const m = S.move;
-  const p = view.planePoint(sx, sy, m.p0.y);
+  const p = view.planeThrough(sx, sy, m.normal, m.p0);
   if (!p) return;
-  const dx = Math.round((p.x - m.p0.x) / P) * P, dz = Math.round((p.z - m.p0.z) / P) * P;
-  if (dx === m.dx && dz === m.dz) return;
+  const d = [snapP(p.x - m.p0.x), snapP(p.y - m.p0.y), snapP(p.z - m.p0.z)];
+  if (d.every((v, k) => v === m.d[k])) return;
   if (!m.undone) { pushUndo(); m.undone = true; }
-  m.dx = dx; m.dz = dz;
-  m.items.forEach((o, k) => { o.x = m.orig[k].x + dx; o.z = m.orig[k].z + dz; });
+  m.d = d;
+  m.items.forEach((o, k) => { restoreCoords(o, m.orig[k]); shiftItem(o, d); });
   view.rebuild(S.doc);
   view.setHighlight(m.selectId, true, 0x3a6fd8);
   schedulePreview();
-}
-// R: turn the selected beam 15 degrees about its first hole; pins and wheels used only by it turn too
-function rotateSelected(deg) {
-  const doc = S.doc;
-  const part = doc.parts.find((p) => p.id === S.selected);
-  if (!part) return;
-  const own = [
-    ...doc.pins.filter((pin) => { const mem = pinMembers(doc, pin).filter((m) => m.kind === 'part'); return mem.length && mem.every((m) => m.part.id === part.id); }),
-    ...[...doc.pulleys, ...doc.winches].filter((w) => { const m = mountOf(doc, w); return m.kind === 'part' && m.part.id === part.id; }),
-  ].filter((o) => Math.hypot(o.x - part.x, o.z - part.z) > EPS);
-  pushUndo();
-  const a = rad(deg), c = Math.cos(a), sn = Math.sin(a);
-  for (const o of own) {
-    const dx = o.x - part.x, dz = o.z - part.z;
-    o.x = Math.round((part.x + dx * c - dz * sn) * 1e6) / 1e6;
-    o.z = Math.round((part.z + dx * sn + dz * c) * 1e6) / 1e6;
-  }
-  part.angle = ((((part.angle + deg) + 180) % 360) + 360) % 360 - 180;
-  commit();
 }
 function endMove() {
   const m = S.move;
@@ -758,11 +956,72 @@ function endMove() {
   if (m.undone) { S.selected = m.selectId; commit(); }
   else select(m.selectId);
 }
+// Arrow keys: push the selected piece one hole along a world axis.
+function nudgeSelected(d) {
+  const f = S.selected !== null ? findById(S.doc, S.selected) : null;
+  if (!f || f.coll === 'strings') return;
+  pushUndo();
+  for (const o of f.coll === 'parts' ? moveSet(f.obj.id, false) : [f.obj]) shiftItem(o, d);
+  commit();
+}
+function duplicateSelected() {
+  const f = S.selected !== null ? findById(S.doc, S.selected) : null;
+  if (!f || f.coll !== 'parts') return;
+  const src = f.obj, box = isBeam(src) ? null : solidBox(src);
+  const span = (k) => (box ? Math.ceil((box.max[k] - box.min[k] - 0.5) / P) || 1 : 1) * P;
+  // next to the original: the first free place to the right, above, to the left, in front
+  let copy = null;
+  for (const d of [[span(0), 0, 0], [0, 0, span(2)], [-span(0), 0, 0], [0, -span(1), 0]]) {
+    const c = JSON.parse(JSON.stringify(src));
+    shiftItem(c, d);
+    if (!box || !blocked(c)) { copy = c; break; }
+  }
+  if (!copy) { toast('Non c\'è posto accanto per la copia.'); return; }
+  pushUndo();
+  copy.id = S.doc.nextId++;
+  S.doc.parts.push(copy);
+  S.selected = copy.id;
+  commit();
+}
+// R: turn the selected piece. A beam turns 15 degrees about its first hole (pins and wheels used
+// only by it turn too), a servo a quarter turn about its shaft, a block swaps two of its sides.
+function rotateSelected(deg) {
+  const doc = S.doc;
+  const part = doc.parts.find((p) => p.id === S.selected);
+  if (!part) return;
+  pushUndo();
+  if (isServo(part)) {
+    part.angle = (((part.angle || 0) + (deg > 0 ? 90 : -90)) % 360 + 360) % 360;
+  } else if (isBlock(part)) {
+    part.s = deg > 0 ? [part.s[1], part.s[0], part.s[2]] : [part.s[0], part.s[2], part.s[1]];
+  } else {
+    const own = [
+      ...doc.pins.filter((pin) => { const mem = pinMembers(doc, pin).filter((m) => m.kind === 'part'); return mem.length && mem.every((m) => m.part.id === part.id); }),
+      ...[...doc.pulleys, ...doc.winches].filter((w) => { const m = mountOf(doc, w); return m.kind === 'part' && m.part.id === part.id; }),
+    ].filter((o) => Math.hypot(o.x - part.x, o.z - part.z) > EPS);
+    const a = rad(deg), c = Math.cos(a), sn = Math.sin(a);
+    for (const o of own) {
+      const dx = o.x - part.x, dz = o.z - part.z;
+      o.x = Math.round((part.x + dx * c - dz * sn) * 1e6) / 1e6;
+      o.z = Math.round((part.z + dx * sn + dz * c) * 1e6) / 1e6;
+    }
+    part.angle = ((((part.angle + deg) + 180) % 360) + 360) % 360 - 180;
+  }
+  commit();
+}
 
 canvas.addEventListener('pointermove', (e) => {
   if (S.move) { updateMove(e.offsetX, e.offsetY); return; }
+  if (S.blockDraft) {
+    const d = S.blockDraft;
+    const p = view.planeThrough(e.offsetX, e.offsetY, new THREE.Vector3(...d.normal), new THREE.Vector3(...d.a));
+    if (p) d.b = [p.x, p.y, p.z].map((v, k) => (d.normal[k] ? d.a[k] : clamp(snapP(v), d.a[k] - 39 * P, d.a[k] + 39 * P)));
+    d.b[2] = Math.max(P, d.b[2]);
+    updateGhost(e.offsetX, e.offsetY);
+    return;
+  }
   if (S.drag) {
-    const wp = view.planePoint(e.offsetX, e.offsetY, S.drag.planeY);
+    const wp = view.planeThrough(e.offsetX, e.offsetY, S.drag.normal, S.drag.origin);
     if (wp) S.drag.target.copy(wp.multiplyScalar(0.001));
     return;
   }
@@ -773,21 +1032,23 @@ canvas.addEventListener('pointermove', (e) => {
 canvas.addEventListener('pointerup', (e) => {
   if (S.drag) { S.drag = null; S.sim?.clearForces(); canvas.releasePointerCapture(e.pointerId); return; }
   if (S.move) { endMove(); canvas.releasePointerCapture(e.pointerId); down = null; return; }
+  if (S.blockDraft) { placeBlock(); canvas.releasePointerCapture(e.pointerId); down = null; updateGhost(e.offsetX, e.offsetY); return; }
   if (!down) return;
   const moved = Math.hypot(e.offsetX - down.x, e.offsetY - down.y) > 5;
   const b = down.b;
   down = null;
   if (moved) return;
-  if (b === 2) { // right click without drag: step back
+  if (b === 2) { // right click without drag: step back, or take a block away
     if (S.draw) { S.draw = null; clearGhost(); updateHint(); }
     else if (S.stringDraft) finishString();
+    else if (S.tool === 'block' && S.mode === 'edit') { eraseAt(e.offsetX, e.offsetY, true); updateGhost(e.offsetX, e.offsetY); }
     return;
   }
   if (b !== 0) return;
   onClick(e.offsetX, e.offsetY, e.detail >= 2);
 });
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
-canvas.addEventListener('pointerleave', () => { if (!S.draw && !S.stringDraft) clearGhost(); setHover(null); });
+canvas.addEventListener('pointerleave', () => { if (!S.draw && !S.stringDraft && !S.blockDraft) clearGhost(); setHover(null); });
 
 function onClick(sx, sy, dbl) {
   if (S.mode === 'run') return;
@@ -795,6 +1056,7 @@ function onClick(sx, sy, dbl) {
   switch (S.tool) {
     case 'beam': clickBeam(); break;
     case 'pin': clickPin(); break;
+    case 'servo': clickServo(); break;
     case 'pulley': clickWheel('pulley'); break;
     case 'winch': clickWheel('winch'); break;
     case 'string': clickString(dbl); break;
@@ -818,15 +1080,19 @@ function select(id) {
 }
 
 // ------------------------------------------------------------------ keyboard
+let lastMouse = null;
+canvas.addEventListener('pointermove', (e) => { lastMouse = { x: e.offsetX, y: e.offsetY }; });
+const NUDGE = { arrowleft: [-P, 0, 0], arrowright: [P, 0, 0], arrowup: [0, 0, P], arrowdown: [0, 0, -P], pageup: [0, P, 0], pagedown: [0, -P, 0] };
 window.addEventListener('keydown', (e) => {
   if (e.target.matches('input, select, textarea')) return;
   const k = e.key.toLowerCase();
   if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
   if ((e.ctrlKey || e.metaKey) && k === 'y') { e.preventDefault(); redo(); return; }
+  if ((e.ctrlKey || e.metaKey) && k === 'd' && S.mode === 'edit') { e.preventDefault(); duplicateSelected(); return; }
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (k === 'escape') {
     if (S.stringDraft) { S.stringDraft = null; clearGhost(); updateHint(); }
-    else if (S.draw) { S.draw = null; clearGhost(); updateHint(); }
+    else if (S.draw || S.blockDraft) { S.draw = null; S.blockDraft = null; clearGhost(); updateHint(); }
     else select(null);
     return;
   }
@@ -834,8 +1100,13 @@ window.addEventListener('keydown', (e) => {
   if (k === ' ') { e.preventDefault(); startSim(); return; }
   if (k === 's') { toggleSchema(); return; }
   if ((k === 'delete' || k === 'backspace') && S.selected !== null && S.mode === 'edit') { pushUndo(); removeObject(S.selected); S.selected = null; commit(); return; }
-  if (k === 'r' && S.mode === 'edit' && S.selected !== null) { rotateSelected(e.shiftKey ? -15 : 15); return; }
-  const map = { v: 'select', b: 'beam', p: 'pin', u: 'pulley', f: 'string', w: 'winch', x: 'erase' };
+  if (NUDGE[k] && S.mode === 'edit' && S.selected !== null) { e.preventDefault(); nudgeSelected(NUDGE[k]); return; }
+  if (k === 'r' && S.mode === 'edit') {
+    if (S.tool === 'servo') { S.servoAngle = (S.servoAngle + (e.shiftKey ? 270 : 90)) % 360; if (lastMouse) updateGhost(lastMouse.x, lastMouse.y); return; }
+    if (S.selected !== null) { rotateSelected(e.shiftKey ? -15 : 15); return; }
+  }
+  if (/^[1-9]$/.test(k)) { setTool(TOOLS[+k - 1]); return; }
+  const map = { v: 'select', c: 'block', b: 'beam', p: 'pin', m: 'servo', u: 'pulley', f: 'string', w: 'winch', x: 'erase' };
   if (map[k]) setTool(map[k]);
 });
 
@@ -878,6 +1149,17 @@ function winchStrings(w) {
   return out;
 }
 
+// Everything with a motor on a joint: pins of type servo and servo parts.
+function servoList() {
+  return [...S.doc.pins.filter((p) => p.type === 'servo'), ...S.doc.parts.filter(isServo)];
+}
+const kgcm = (nm) => nm / 0.0980665;
+// How far a winch can reel in (mm): half a turn of the drum each way for a servo with a spool.
+function winchTravel(w) {
+  const sp = servoSpec(w);
+  return sp ? rad(sp.range) * w.r : Infinity;
+}
+
 function renderControls() {
   const el = $('controls');
   el.innerHTML = '';
@@ -887,12 +1169,12 @@ function renderControls() {
     const list = winchStrings(w);
     if (!list.length) continue;
     const lens = list.filter((x) => x.wind === 1).map((x) => (S.preview?.lengths?.[x.s.id] ?? S.sim?.lengths?.[x.s.id] ?? 0.1) * 1000);
-    const max = Math.max(10, Math.floor(Math.min(...(lens.length ? lens : [60])) * 0.8));
+    const max = Math.max(10, Math.floor(Math.min(winchTravel(w), Math.min(...(lens.length ? lens : [60])) * 0.8)));
     items.push({ kind: 'winch', w, list, max });
   }
-  for (const pin of doc.pins) if (pin.type === 'servo') items.push({ kind: 'servo', pin });
+  for (const o of servoList()) items.push({ kind: 'servo', o });
   if (!items.length) {
-    el.innerHTML = '<p class="empty">Qui compaiono gli slider dei motori. Monta un <b>verricello</b> e fai partire un filo da lì, oppure metti un perno <b>servo</b>.</p>';
+    el.innerHTML = '<p class="empty">Qui compaiono gli slider dei motori. Monta un <b>servo</b> e appoggia una trave sul suo albero, oppure monta un <b>verricello</b> e fai partire un filo da lì.</p>';
     return;
   }
   let nw = 0, ns = 0;
@@ -901,28 +1183,33 @@ function renderControls() {
     box.className = 'ctl';
     if (it.kind === 'winch') {
       const id = `ctl_w${it.w.id}`;
-      const v = S.controls.winch[it.w.id] ?? 0;
+      const v = Math.min(it.max, S.controls.winch[it.w.id] ?? 0);
       const rows = it.list.map(({ s, wind }) => `<div class="strrow" data-sid="${s.id}">
           <span class="sname"><span class="wind">${wind === 1 ? '⟲ avvolge' : '⟳ svolge'}</span> ${escapeHtml(s.name || 'Filo')}</span><span class="val" data-t>—</span>
           <div class="meter" data-m><i></i></div></div>`).join('');
-      box.innerHTML = `<div class="row"><label class="name" for="${id}">Verricello ${++nw}</label><span class="val" data-v>gira ${fmt(v, 0)} mm</span></div>
+      box.innerHTML = `<div class="row"><label class="name" for="${id}">Verricello ${++nw}${it.w.model ? ' · ' + it.w.model : ''}</label><span class="val" data-v>gira ${fmt(v, 0)} mm</span></div>
         <input type="range" id="${id}" min="0" max="${it.max}" step="0.5" value="${v}">
         ${rows}
-        <div class="row"><span class="val muted">forza max per filo</span><span class="val">${fmt(it.w.fmax ?? 10, 0)} N</span></div>
+        <div class="row"><span class="val muted">forza max per filo</span><span class="val">${fmt(winchForce(it.w), 0)} N</span></div>
         <div class="note" data-n hidden></div>`;
       const r = box.querySelector('input');
       r.oninput = () => { S.controls.winch[it.w.id] = +r.value; box.querySelector('[data-v]').textContent = `gira ${fmt(+r.value, 0)} mm`; S.sim?.setControls(S.controls); markDirty(); };
       box.dataset.winch = it.w.id;
     } else {
-      const id = `ctl_p${it.pin.id}`;
-      const v = S.controls.servo[it.pin.id] ?? 0;
-      box.innerHTML = `<div class="row"><label class="name" for="${id}">Servo ${++ns}</label><span class="val" data-v>${fmt(v, 0)}°</span></div>
-        <input type="range" id="${id}" min="-150" max="150" step="1" value="${v}">
-        <div class="row"><span class="val" data-t>coppia —</span><span class="val">max ${fmt((it.pin.tmax ?? 0.2) * 100, 0)} N·cm</span></div>
+      const o = it.o, sv = servoParams(o);
+      const lo = Math.max(sv.travel[0], sv.range ? sv.range[0] : -Infinity), hi = Math.min(sv.travel[1], sv.range ? sv.range[1] : Infinity);
+      const id = `ctl_p${o.id}`;
+      const v = clamp(S.controls.servo[o.id] ?? 0, lo, hi);
+      box.innerHTML = `<div class="row"><label class="name" for="${id}">Servo ${++ns}${o.model ? ' · ' + o.model : ''}</label><span class="val" data-v>${fmt(v, 0)}°</span></div>
+        <input type="range" id="${id}" min="${lo}" max="${hi}" step="1" value="${v}">
+        <div class="row"><span class="val" data-t>coppia —</span><span class="val">max ${fmt(kgcm(sv.tmax), 1)} kg·cm</span></div>
         <div class="meter" data-m><i></i></div><div class="note" data-n hidden></div>`;
       const r = box.querySelector('input');
-      r.oninput = () => { S.controls.servo[it.pin.id] = +r.value; box.querySelector('[data-v]').textContent = `${fmt(+r.value, 0)}°`; S.sim?.setControls(S.controls); markDirty(); };
-      box.dataset.pin = it.pin.id;
+      r.oninput = () => { S.controls.servo[o.id] = +r.value; box.querySelector('[data-v]').textContent = `${fmt(+r.value, 0)}°`; S.sim?.setControls(S.controls); markDirty(); };
+      box.onmouseenter = () => { if (S.selected !== o.id) view.setHighlight(o.id, true, 0x888888); };
+      box.onmouseleave = () => { if (S.selected !== o.id) view.setHighlight(o.id, false); };
+      box.dataset.pin = o.id;
+      box.dataset.tmax = sv.tmax;
     }
     el.appendChild(box);
   }
@@ -942,7 +1229,7 @@ function updateLiveReadouts() {
     let note = '';
     if (box.dataset.winch) {
       const w = S.doc.winches.find((x) => x.id === +box.dataset.winch);
-      const max = w?.fmax ?? 10;
+      const max = w ? winchForce(w) : 10;
       for (const row of box.querySelectorAll('.strrow')) {
         const sid = +row.dataset.sid;
         const s = S.doc.strings.find((x) => x.id === sid);
@@ -956,19 +1243,20 @@ function updateLiveReadouts() {
       }
     } else {
       const pid = +box.dataset.pin;
-      const pin = S.doc.pins.find((x) => x.id === pid);
-      const val = Math.abs(sim.servoTorque(pid)), max = pin?.tmax ?? 0.2;
-      box.querySelector('[data-t]').textContent = `coppia ${fmt(val * 100, 1)} N·cm`;
+      const val = Math.abs(sim.servoTorque(pid)), max = +box.dataset.tmax || 0.2;
+      box.querySelector('[data-t]').textContent = `coppia ${fmt(kgcm(val), 2)} kg·cm`;
       const m = box.querySelector('[data-m]');
       m.querySelector('i').style.width = Math.min(100, (val / max) * 100) + '%';
       m.classList.toggle('hot', val >= max * 0.98);
-      if (val >= max * 0.98) note = 'Il servo è al limite di coppia.';
+      if (val >= max * 0.98) note = 'Il servo è al limite di coppia: il carico è troppo per questo modello.';
     }
     const n = box.querySelector('[data-n]');
     n.hidden = !note;
     n.textContent = note;
   }
 }
+
+const FAM_LABEL = { y: 'Contro il muro', z: 'In piano (fori in su)', x: 'Di taglio (fori di lato)' };
 
 function renderInspector() {
   const el = $('inspector');
@@ -987,37 +1275,89 @@ function renderInspector() {
     const row = add(`<div class="prop"><label for="${id}">${label}</label><span><input type="number" id="${id}" value="${value}" min="${min}" max="${max}" step="${step}" ${editable ? '' : 'disabled'}> ${unit}</span></div>`);
     row.querySelector('input').onchange = (e) => { const v = Math.min(max, Math.max(min, +e.target.value)); pushUndo(); onChange(v); commit(); };
   };
-  const delBtn = () => {
-    const b = add(`<button class="danger" ${editable ? '' : 'disabled'}>Elimina</button>`);
-    b.onclick = () => { pushUndo(); removeObject(o.id); S.selected = null; commit(); };
+  const info = (label, value) => add(`<div class="prop"><label>${label}</label><span class="num">${value}</span></div>`);
+  const segProp = (opts, cur, onPick) => {
+    const seg = add('<div class="seg"></div>');
+    for (const [v, txt] of opts) {
+      const b = document.createElement('button');
+      b.textContent = txt; b.className = cur === v ? 'on' : ''; b.disabled = !editable;
+      b.onclick = () => { pushUndo(); onPick(v); commit(); };
+      seg.appendChild(b);
+    }
   };
-  if (f.coll === 'parts') {
-    $('inspTitle').textContent = 'Trave';
-    add(`<div class="prop"><label>Fori</label><span class="num">${o.holes} · ${fmt((o.holes - 1) * P + BEAM_W, 1)} mm</span></div>`);
-    numProp('Lunghezza (fori)', o.holes, 2, 25, 1, (v) => (o.holes = v));
-    numProp('Angolo', +(+o.angle).toFixed(1), -180, 180, 15, (v) => (o.angle = v), '°');
-    numProp('Strato', o.layer, 1, 12, 1, (v) => (o.layer = v));
+  const swatches = (colors) => {
     const sw = add('<div class="swatches"></div>');
-    for (const c of BEAM_COLORS) {
+    for (const c of colors) {
       const b = document.createElement('button');
       b.style.background = c; b.className = o.color === c ? 'on' : ''; b.title = 'Colore'; b.setAttribute('aria-label', 'Colore ' + c);
       b.disabled = !editable;
       b.onclick = () => { pushUndo(); o.color = c; commit(); };
       sw.appendChild(b);
     }
+  };
+  const delBtn = () => {
+    const b = add(`<button class="danger" ${editable ? '' : 'disabled'}>Elimina</button>`);
+    b.onclick = () => { pushUndo(); removeObject(o.id); S.selected = null; commit(); };
+  };
+  // model picker shared by servo parts, motor pins and winches
+  const modelPicker = (allowGeneric, onPick) => {
+    segProp([...(allowGeneric ? [['', 'Generico']] : []), ...Object.keys(SERVO_MODELS).map((k) => [k, k])], o.model || '', onPick);
+  };
+  const specSheet = (sp) => {
+    add(`<p class="empty">${sp.kind}</p>`);
+    info('Coppia', `${fmt(sp.kgcm, 1)} kg·cm`);
+    info('Velocità', `${fmt(60 / sp.speed, 2)} s / 60°`);
+    info('Corsa', `${sp.range}°`);
+    info('Peso', `${fmt(sp.mass * 1000, 0)} g`);
+    info('Corpo', `${fmt(sp.body[0], 1)} × ${fmt(sp.body[1], 1)} mm`);
+    info('Tensione', sp.volt);
+  };
+
+  if (f.coll === 'parts' && isBlock(o)) {
+    $('inspTitle').textContent = 'Blocco';
+    info('Misura', `${o.s.map((n) => n * P).join(' × ')} mm`);
+    const dims = ['Larghezza', 'Profondità', 'Altezza'];
+    dims.forEach((lbl, k) => numProp(lbl, o.s[k], 1, 40, 1, (v) => { const old = o.s[k]; o.s[k] = v; if (blocked(o, o.id)) { o.s[k] = old; toast('Non c\'è spazio per allungarlo.'); } }, 'fori'));
+    swatches(BLOCK_COLORS);
+    const gl = add(`<label class="prop"><span>Si incolla a ciò che tocca</span><input type="checkbox" ${o.glue !== false ? 'checked' : ''} ${editable ? '' : 'disabled'}></label>`);
+    gl.querySelector('input').onchange = (e) => { pushUndo(); if (e.target.checked) delete o.glue; else o.glue = false; commit(); };
+    add('<p class="empty">Ha un foro su ogni faccia: ci passano perni e alberi dei servo, e i fili ci si legano. Togli la colla se deve muoversi accanto ad altri blocchi.</p>');
+    delBtn();
+  } else if (f.coll === 'parts' && isServo(o)) {
+    $('inspTitle').textContent = 'Servo ' + o.model;
+    modelPicker(false, (v) => { const old = o.model, L = o.layer; o.layer += (o.dir || 1) * (SERVO_MODELS[v].layers - SERVO_MODELS[old].layers); o.model = v; if (blocked(o, o.id)) { o.model = old; o.layer = L; toast('Questo modello qui non ci sta.'); } });
+    specSheet(SERVO_MODELS[o.model]);
+    info('Montato', FAM_LABEL[fam(o)].toLowerCase());
+    const drives = shaftMembers(S.doc, o);
+    add(`<p class="empty">${drives.length ? `Fa girare: ${drives.map(partLabel).join(', ').toLowerCase()}.` : 'Non muove ancora niente: appoggia una trave o un blocco sul suo albero.'}</p>`);
+    const rb = add(`<button ${editable ? '' : 'disabled'}>Gira il corpo di 90° (R)</button>`);
+    rb.onclick = () => rotateSelected(90);
+    if (S.mode === 'run' && S.sim) {
+      const a = S.sim.pinAngle(o.id);
+      if (a !== null) info('Angolo adesso', `${fmt(a, 1)}°`);
+    }
+    delBtn();
+  } else if (f.coll === 'parts') {
+    $('inspTitle').textContent = 'Trave';
+    info('Fori', `${o.holes} · ${fmt((o.holes - 1) * P + BEAM_W, 1)} mm`);
+    numProp('Lunghezza (fori)', o.holes, 2, 25, 1, (v) => (o.holes = v));
+    numProp('Angolo', +(+o.angle).toFixed(1), -180, 180, 15, (v) => (o.angle = v), '°');
+    numProp('Strato', o.layer, -40, 40, 1, (v) => (o.layer = v));
+    info('Piano', FAM_LABEL[fam(o)]);
+    swatches(BEAM_COLORS);
     delBtn();
   } else if (f.coll === 'pins') {
     $('inspTitle').textContent = PIN_LABEL[o.type];
-    const seg = add('<div class="seg"></div>');
-    for (const t of ['hinge', 'weld', 'servo']) {
-      const b = document.createElement('button');
-      b.textContent = PIN_LABEL[t]; b.className = o.type === t ? 'on' : ''; b.disabled = !editable;
-      b.onclick = () => { pushUndo(); o.type = t; commit(); };
-      seg.appendChild(b);
-    }
+    segProp(['hinge', 'weld', 'servo'].map((t) => [t, PIN_LABEL[t]]), o.type, (t) => (o.type = t));
     const mem = pinMembers(S.doc, o);
-    add(`<p class="empty">Unisce ${mem.length} ${mem.length === 1 ? 'pezzo' : 'pezzi'} (strati ${o.lo}–${o.hi})${mem.some((m) => m.kind === 'board') ? ', tavola compresa' : ''}.</p>`);
-    if (o.type !== 'weld') {
+    add(`<p class="empty">Unisce ${mem.length} ${mem.length === 1 ? 'pezzo' : 'pezzi'} (strati ${o.lo}–${o.hi})${mem.some((m) => m.kind === 'board') ? ', base compresa' : ''}.</p>`);
+    if (o.type === 'servo') {
+      add('<p class="empty">Motore:</p>');
+      modelPicker(true, (v) => { if (v) { o.model = v; delete o.tmax; delete o.range; delete o.free; } else delete o.model; });
+      const sp = servoSpec(o);
+      if (sp) { info('Coppia', `${fmt(sp.kgcm, 1)} kg·cm`); info('Velocità', `${fmt(60 / sp.speed, 2)} s / 60°`); info('Corsa', `${sp.range}°`); }
+    }
+    if (o.type !== 'weld' && !servoSpec(o)) {
       const lim = add(`<label class="prop"><span>Giro completo libero</span><input type="checkbox" ${o.free ? 'checked' : ''} ${editable ? '' : 'disabled'}></label>`);
       lim.querySelector('input').onchange = (e) => { pushUndo(); if (e.target.checked) o.free = true; else delete o.free; commit(); };
       if (!o.free) {
@@ -1026,43 +1366,41 @@ function renderInspector() {
         numProp('fino a', r[1], 0, 180, 5, (v) => (o.range = [(o.range || r)[0], v]), '°');
       }
     }
-    if (o.type === 'servo') numProp('Coppia max', +((o.tmax ?? 0.2) * 100).toFixed(1), 1, 500, 1, (v) => (o.tmax = v / 100), 'N·cm');
+    if (o.type === 'servo' && !servoSpec(o)) numProp('Coppia max', +((o.tmax ?? 0.2) * 100).toFixed(1), 1, 500, 1, (v) => (o.tmax = v / 100), 'N·cm');
     if (S.mode === 'run' && S.sim) {
       const a = S.sim.pinAngle(o.id);
-      if (a !== null) add(`<div class="prop"><label>Angolo adesso</label><span class="num">${fmt(a, 1)}°</span></div>`);
+      if (a !== null) info('Angolo adesso', `${fmt(a, 1)}°`);
     }
     delBtn();
   } else if (f.coll === 'pulleys') {
     $('inspTitle').textContent = 'Puleggia';
+    segProp(PULLEY_SIZES.map(([r, t]) => [r, t]), o.r, (v) => (o.r = v));
     numProp('Raggio', o.r, 3, 24, 1, (v) => (o.r = v), 'mm');
     add('<p class="empty">Il braccio di leva del filo attorno al perno è circa uguale al raggio: più grande, più coppia con la stessa forza.</p>');
     delBtn();
   } else if (f.coll === 'winches') {
     $('inspTitle').textContent = 'Verricello';
-    numProp('Forza max', o.fmax ?? 10, 0.5, 200, 0.5, (v) => (o.fmax = v), 'N');
+    add('<p class="empty">Motore che fa girare il tamburo:</p>');
+    modelPicker(true, (v) => { if (v) o.model = v; else delete o.model; });
+    numProp('Raggio del tamburo', o.r, 4, 20, 1, (v) => (o.r = v), 'mm');
+    const sp = servoSpec(o);
+    if (sp) {
+      info('Forza sul filo', `${fmt(winchForce(o), 1)} N`);
+      info('Corsa del filo', `${fmt(winchTravel(o), 0)} mm`);
+      info('Velocità', `${fmt(rad(sp.speed) * o.r, 0)} mm/s`);
+      add(`<p class="empty">${sp.name}: ${fmt(sp.kgcm, 1)} kg·cm su un tamburo di ${o.r} mm di raggio. Tamburo più piccolo, più forza ma meno corsa.</p>`);
+    } else numProp('Forza max', o.fmax ?? 10, 0.5, 200, 0.5, (v) => (o.fmax = v), 'N');
     delBtn();
   } else if (f.coll === 'strings') {
     $('inspTitle').textContent = STRING_LABEL[o.kind];
     const nm = add(`<div class="prop"><label for="strName">Nome</label><input id="strName" value="${escapeHtml(o.name || '')}" placeholder="es. Flessore" style="width:150px;padding:5px 6px;border:1px solid var(--line);border-radius:6px;background:var(--raised)" ${editable ? '' : 'disabled'}></div>`);
     nm.querySelector('input').onchange = (e) => { pushUndo(); o.name = e.target.value.slice(0, 40); commit(); };
-    const seg = add('<div class="seg"></div>');
-    for (const t of ['string', 'elastic']) {
-      const b = document.createElement('button');
-      b.textContent = STRING_LABEL[t]; b.className = o.kind === t ? 'on' : ''; b.disabled = !editable;
-      b.onclick = () => { pushUndo(); o.kind = t; if (t === 'elastic') { o.stiffness ??= 60; o.pretension ??= 3; } commit(); };
-      seg.appendChild(b);
-    }
-    add(`<div class="prop"><label>Passa per</label><span class="num">${o.anchors.length} punti</span></div>`);
+    segProp(['string', 'elastic'].map((t) => [t, STRING_LABEL[t]]), o.kind, (t) => { o.kind = t; if (t === 'elastic') { o.stiffness ??= 60; o.pretension ??= 3; } });
+    info('Passa per', `${o.anchors.length} punti`);
     const onWinch = o.anchors[0]?.t === 'winch' || o.anchors[o.anchors.length - 1]?.t === 'winch';
     if (onWinch) {
       add('<p class="empty">Sul tamburo del verricello questo filo:</p>');
-      const seg = add('<div class="seg"></div>');
-      for (const [v, txt] of [[1, '⟲ si avvolge (tira)'], [-1, '⟳ si svolge (rilascia)']]) {
-        const b = document.createElement('button');
-        b.textContent = txt; b.className = (o.wind === -1 ? -1 : 1) === v ? 'on' : ''; b.disabled = !editable;
-        b.onclick = () => { pushUndo(); if (v === -1) o.wind = -1; else delete o.wind; commit(); };
-        seg.appendChild(b);
-      }
+      segProp([[1, '⟲ si avvolge (tira)'], [-1, '⟳ si svolge (rilascia)']], o.wind === -1 ? -1 : 1, (v) => { if (v === -1) o.wind = -1; else delete o.wind; });
       add('<p class="empty">Due fili sullo stesso verricello, uno che si avvolge e uno che si svolge, lavorano come una cinghia: uno chiude, l\'altro riapre.</p>');
     }
     if (o.kind === 'elastic') {
@@ -1072,10 +1410,10 @@ function renderInspector() {
       numProp('Rigidezza (0 = non si allunga)', o.stiffness ?? 0, 0, 100000, 100, (v) => { if (v > 0) o.stiffness = v; else delete o.stiffness; }, 'N/m');
     }
     const sim = S.mode === 'run' ? S.sim : S.preview;
-    if (sim) add(`<div class="prop"><label>Lunghezza</label><span class="num">${fmt(sim.tendonLength(o.id) * 1000, 1)} mm</span></div>`);
-    if (S.mode === 'run' && S.sim) add(`<div class="prop"><label>Tensione</label><span class="num">${fmt(S.sim.tension(o.id), 2)} N</span></div>`);
-    const count = (t) => o.anchors.filter((a) => a.t === t).length;
-    const parts = [[count('guide'), 'occhiell', 'o', 'i'], [count('pulley'), 'puleg', 'gia', 'ge'], [count('hole'), 'for', 'o', 'i']].filter((x) => x[0]).map(([n, w, s1, sp]) => `${n} ${w}${n === 1 ? s1 : sp}`);
+    if (sim) info('Lunghezza', `${fmt(sim.tendonLength(o.id) * 1000, 1)} mm`);
+    if (S.mode === 'run' && S.sim) info('Tensione', `${fmt(S.sim.tension(o.id), 2)} N`);
+    const count = (...t) => o.anchors.filter((a) => t.includes(a.t)).length;
+    const parts = [[count('guide'), 'occhiell', 'o', 'i'], [count('pulley'), 'puleg', 'gia', 'ge'], [count('hole', 'pt', 'board', 'world'), 'for', 'o', 'i']].filter((x) => x[0]).map(([n, w, s1, sp]) => `${n} ${w}${n === 1 ? s1 : sp}`);
     add(`<p class="empty">Passa da ${parts.join(', ') || 'due punti'}.</p>`);
     const rb = add(`<button ${editable ? '' : 'disabled'}>Rifai il percorso</button>`);
     rb.title = 'Riclicca i punti da cui passa: il filo tiene nome e impostazioni';
@@ -1135,6 +1473,7 @@ $('btnStop').onclick = stopSim;
 $('btnPause').onclick = () => { S.paused = !S.paused; syncRunUI(); };
 $('selSpeed').onchange = (e) => (S.speed = +e.target.value);
 $('btnFront').onclick = () => view.frontView();
+$('btnIso').onclick = () => view.isoView();
 function toggleSchema() {
   const on = !view.schema;
   view.setSchema(on);
@@ -1156,6 +1495,7 @@ $('chkGravity').onchange = (e) => {
 $('btnExample').onclick = (e) => { e.stopPropagation(); $('exMenu').hidden = !$('exMenu').hidden; $('fileMenu').hidden = true; };
 $('btnEx1').onclick = () => { newProject(fingerDemo(), 'Dito con elastici'); toast('Esempio caricato: premi Simula e muovi lo slider del verricello.'); };
 $('btnEx2').onclick = () => { newProject(fingerBeltDemo(), 'Dito a cinghia'); toast('Esempio caricato: premi Simula e muovi lo slider del verricello.'); };
+$('btnEx3').onclick = () => { newProject(armDemo(), 'Braccio con due servo'); toast('Esempio caricato: premi Simula e muovi gli slider dei due servo.'); };
 $('btnFile').onclick = (e) => { e.stopPropagation(); $('fileMenu').hidden = !$('fileMenu').hidden; $('exMenu').hidden = true; };
 document.addEventListener('click', () => { $('fileMenu').hidden = true; $('exMenu').hidden = true; });
 $('btnNew').onclick = () => newProject();
@@ -1189,7 +1529,8 @@ $('projClose').onclick = () => ($('projDialog').hidden = true);
 $('projNew').onclick = () => { newProject(); $('projDialog').hidden = true; };
 $('wExample').onclick = () => { $('welcome').hidden = true; newProject(fingerDemo(), 'Dito con elastici'); };
 $('wExample2').onclick = () => { $('welcome').hidden = true; newProject(fingerBeltDemo(), 'Dito a cinghia'); };
-$('wEmpty').onclick = () => { $('welcome').hidden = true; setTool('beam'); };
+$('wExample3').onclick = () => { $('welcome').hidden = true; newProject(armDemo(), 'Braccio con due servo'); };
+$('wEmpty').onclick = () => { $('welcome').hidden = true; setTool('block'); };
 const slug = (s) => s.toLowerCase().normalize('NFD').replace(/[^\w]+/g, '-').replace(/^-|-$/g, '') || 'robotbuilder';
 
 const darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
@@ -1251,7 +1592,8 @@ function renderInspectorLive() {
 // ------------------------------------------------------------------ boot
 async function boot() {
   view.rebuild(S.doc);
-  setTool('beam');
+  view.isoView(false);
+  setTool('block');
   requestAnimationFrame(frame);
   try {
     await initPhysics();
@@ -1276,3 +1618,4 @@ boot();
 window.__rb = { S, view };
 
 window.addEventListener('beforeunload', () => { if (S.dirty) saveNow(); });
+

@@ -18,6 +18,7 @@
         <button id="btnExample">Esempi ▾</button>
         <div class="menupop" id="exMenu" hidden>
           <button id="btnEx1"><b>Dito con elastici</b><br><span class="sub">Il verricello chiude, tre elastici riaprono</span></button>
+          <button id="btnEx3"><b>Braccio con due servo</b><br><span class="sub">Blocchi, un MG996R che gira la torretta e un SG90 che alza il braccio</span></button>
           <button id="btnEx2"><b>Dito a cinghia</b><br><span class="sub">Un filo chiude e uno riapre, falangi accoppiate, niente molle</span></button>
         </div>
       </div>
@@ -40,8 +41,10 @@
 
   <nav class="tools" id="tools" aria-label="Attrezzi">
     <button data-tool="select" title="Seleziona e trascina (V)"><svg viewBox="0 0 24 24"><path d="M5 3l14 8-6 2-2 6z"/></svg><span>Mano</span><kbd>V</kbd></button>
+    <button data-tool="block" title="Blocco: clicca una faccia per appoggiarlo (C)"><svg viewBox="0 0 24 24"><path d="M12 3 4 7.5v9L12 21l8-4.5v-9z"/><path d="M4 7.5 12 12l8-4.5M12 12v9"/></svg><span>Blocco</span><kbd>C</kbd></button>
     <button data-tool="beam" title="Trave forata (B)"><svg viewBox="0 0 24 24"><rect x="2" y="9" width="20" height="6" rx="3"/><circle cx="5.5" cy="12" r="1.2"/><circle cx="10" cy="12" r="1.2"/><circle cx="14" cy="12" r="1.2"/><circle cx="18.5" cy="12" r="1.2"/></svg><span>Trave</span><kbd>B</kbd></button>
     <button data-tool="pin" title="Perno (P)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2.5"/></svg><span>Perno</span><kbd>P</kbd></button>
+    <button data-tool="servo" title="Servo: SG90, MG90S, MG996R, DS3218… (M)"><svg viewBox="0 0 24 24"><rect x="4" y="8" width="16" height="12" rx="1.5"/><path d="M2 12h2M20 12h2"/><circle cx="9" cy="8" r="3"/><path d="M9 5V2.5"/></svg><span>Servo</span><kbd>M</kbd></button>
     <button data-tool="pulley" title="Puleggia / rinvio (U)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="6"/><path d="M4 4l2 8M20 20l-2-8"/></svg><span>Puleggia</span><kbd>U</kbd></button>
     <button data-tool="string" title="Filo (F)"><svg viewBox="0 0 24 24"><path d="M4 18c4-10 6 2 10-6s4-6 6-8"/><circle cx="4" cy="18" r="1.6"/><circle cx="20" cy="4" r="1.6"/></svg><span>Filo</span><kbd>F</kbd></button>
     <button data-tool="winch" title="Verricello: motore che tira un filo (W)"><svg viewBox="0 0 24 24"><rect x="3" y="7" width="10" height="10" rx="1.5"/><circle cx="17" cy="12" r="4"/><path d="M17 8v-5"/></svg><span>Verricello</span><kbd>W</kbd></button>
@@ -54,6 +57,7 @@
     <div class="navcube" id="navcube">
       <div class="navbtns">
         <button id="btnFront" class="icon" title="Vista frontale, centrata sul modello" aria-label="Vista frontale"><svg viewBox="0 0 24 24"><path d="M4 11 12 4l8 7"/><path d="M6 10v9h12v-9"/></svg></button>
+        <button id="btnIso" class="icon" title="Vista 3D di tre quarti, centrata sul modello" aria-label="Vista 3D"><svg viewBox="0 0 24 24"><path d="M12 3 4 7.5v9L12 21l8-4.5v-9z"/><path d="M4 7.5 12 12l8-4.5M12 12v9"/></svg></button>
         <button id="btnSchema" class="chip" title="Pezzi in trasparenza e fili in evidenza, ognuno col suo colore (S)" aria-pressed="false">Vista schema</button>
         <button id="btnProj" class="chip" title="Passa tra vista in prospettiva e ortogonale (senza prospettiva, tutto in asse)">Prospettiva</button>
       </div>
@@ -68,18 +72,20 @@
     </div>
     <div class="welcome" id="welcome" hidden>
       <div class="card">
-        <h1>Costruisci, poi premi Simula</h1>
+        <h1>Costruisci come coi mattoncini, poi premi Simula</h1>
         <ol>
-          <li><b>Trave</b>: clicca un foro della tavola, poi un secondo punto. Continua a cliccare per aggiungere falangi; ogni nuova trave è già imperniata alla precedente.</li>
-          <li><b>Puleggia</b>: clicca un foro per mettere un rinvio.</li>
-          <li><b>Filo</b>: clicca in sequenza i fori, gli <b>occhielli</b> ai lati delle travi (il filo ci scorre dentro) e le pulegge (dal lato in cui vuoi far passare il filo). Se parti da un <b>verricello</b>, il filo è motorizzato.</li>
+          <li><b>Blocco</b>: clicca una faccia del pavimento, del muro o di un altro pezzo e il blocco ci si appoggia sopra. Trascina per farlo lungo. I blocchi che si toccano restano incollati.</li>
+          <li><b>Servo</b>: scegli il modello (SG90, MG996R…) e clicca un foro. Quello che appoggi sul suo albero gira con lui.</li>
+          <li><b>Trave</b> e <b>Perno</b>: clicca un foro, poi il punto finale. Ogni trave nasce imperniata a quella da cui parte, sul piano della faccia che clicchi.</li>
+          <li><b>Filo</b>, <b>Puleggia</b>, <b>Verricello</b>: per i meccanismi a tendini, come le dita di una mano.</li>
           <li><b>Simula</b>: muovi gli slider a destra o trascina i pezzi col mouse.</li>
         </ol>
-        <p class="mouse">Tasto destro: ruota la vista · rotella: zoom · tasto centrale: sposta · Esc: annulla</p>
+        <p class="mouse">Tasto destro: ruota la vista · rotella: zoom · tasto centrale: sposta · 1–9: attrezzi · Ctrl+Z: annulla</p>
         <div class="actions">
-          <button id="wExample" class="primary">Esempio: dito con elastici</button>
-          <button id="wExample2" class="primary">Esempio: dito a cinghia</button>
-          <button id="wEmpty">Parti da zero</button>
+          <button id="wEmpty" class="primary">Parti da zero</button>
+          <button id="wExample3">Esempio: braccio con due servo</button>
+          <button id="wExample">Esempio: dito con elastici</button>
+          <button id="wExample2">Esempio: dito a cinghia</button>
         </div>
       </div>
     </div>
