@@ -6,7 +6,7 @@ import { fingerDemo, fingerBeltDemo, armDemo } from './demo.js';
 import { openStore, lastProjectId, setLastProjectId, saveFile } from './storage.js';
 import { servoParams } from './mjcf.js';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
-import { withDependents, boundsOf, cloneItems, xfShift, xfMirrorX, bom, bomCsv, interferences } from './ops.js';
+import { withDependents, boundsOf, cloneItems, xfShift, xfMirrorX, sceneTree, bom, bomCsv, interferences } from './ops.js';
 import {
   P, BEAM_W, LAYER, rad, emptyDoc, holePos, holeAt, holeIndexAt, layerBehind, pinAt, pinMembers, findById, prune, BEAM_COLORS, BLOCK_COLORS, PIN_LABEL,
   STRING_LABEL, BOARD, FLOOR, EPS, guidePos, anchorPos, mountOf, fam, NVEC, toWorld, toFam, famQuat, isBeam, isBlock, isServo, holeWorld,
@@ -32,6 +32,7 @@ const S = {
   servoAngle: 0,
   pulleyR: 6,
   tour: null,          // guided tutorial: {i, doneAt, was}
+  nodeSel: null, nodeHot: null, nodeDrag: null, // string path editing
   typed: { v: '', a: '', f: 0 }, // dimension being typed: value, angle, active field
   join: null,          // join tool: {id, i} the beam hole that will be moved
   draw: null,          // beam being drawn: {n, start:{x,z,base}, layer, sgn}
@@ -73,7 +74,7 @@ const HINTS = {
   servo: 'Clicca un foro per montarci il <b>servo</b>: l\'albero esce verso di te. <b>R</b> gira il corpo. Poi appoggia una trave o un blocco sull\'albero: è quello che il servo fa girare.',
   pulley: 'Clicca un foro per montarci una <b>puleggia</b>: il filo ci gira attorno e cambia direzione.',
   string0: 'Clicca il punto di partenza del filo: un <b>verricello</b> (filo motorizzato) o un foro.',
-  string1: 'Clicca i fori, gli <b>occhielli</b> ai lati delle travi e le pulegge da cui passa. Sulla puleggia, clicca <b>dal lato</b> in cui vuoi il filo. Doppio clic o <b>Invio</b> per chiudere, <b>Esc</b> per annullare.',
+  string1: 'Clicca in ordine i punti da cui passa: fori, <b>occhielli</b> ai lati delle travi, pulegge (dal <b>lato</b> in cui vuoi il filo). I numeri mostrano il percorso. <b>Backspace</b> toglie l\'ultimo punto, doppio clic o <b>Invio</b> chiude, <b>Esc</b> annulla.',
   winch: 'Clicca un foro per montare un <b>verricello</b>: poi partici con un filo e lo comandi con lo slider.',
   erase: 'Clicca quello che vuoi togliere.',
   reroute: 'Rifai il percorso: clicca di nuovo, in ordine, tutti i punti da cui passa il filo (verricello, fori, <b>occhielli</b>, pulegge). <b>Esc</b> lascia il percorso di prima.',
@@ -618,6 +619,7 @@ function updateGhost(sx, sy) {
           const w = (h.t === 'pulley' ? S.doc.pulleys : S.doc.winches).find((e) => e.id === h.id);
           ring({ ...h, sgn: view.facing(h.n, p) }, (w.r + 1.5) / HOLE());
         } else ring(h, h.t === 'guide' ? 0.6 : 1);
+        ghostLabels.push({ text: stringClickText(a), pos: [p.x, p.y, p.z + 5], cls: 'ghost' });
       }
     }
     if (pts.length >= 2) {
@@ -838,7 +840,8 @@ function placeBlock() {
   commit();
 }
 
-function clickString(dbl) {
+function clickString(dbl) { clickStringRaw(dbl); updateNodes(); }
+function clickStringRaw(dbl) {
   const h = S.hover;
   const a = targetToAnchor(h);
   if (!S.stringDraft) {
@@ -875,13 +878,15 @@ function finishString() {
   if (d.anchors.length < 2) { toast('Un filo ha bisogno di almeno due punti.'); updateHint(); return; }
   pushUndo();
   const old = d.replaceId != null ? S.doc.strings.find((x) => x.id === d.replaceId) : null;
-  if (old) { old.anchors = d.anchors; S.selected = old.id; commit(); updateHint(); return; }
+  if (old) { old.anchors = d.anchors; S.selected = old.id; commit(); setTool('select'); return; }
   const s = { id: S.doc.nextId++, kind: d.kind, anchors: d.anchors };
   if (d.kind === 'elastic') { s.stiffness = 60; s.pretension = 3; }
   S.doc.strings.push(s);
-  S.selected = s.id;
+  S.selected = s.id; S.multi = [];
   commit();
-  updateHint();
+  // back to the hand with the new string selected: its numbered points are there to be adjusted
+  setTool('select');
+  toast('Filo creato. Trascina i numeri per correggere il percorso, F per un altro filo.');
 }
 
 function eraseAt(sx, sy, onlySolids = false) {
@@ -910,6 +915,7 @@ function cancelDrafts() {
   S.draw = null;
   S.blockDraft = null;
   S.stringDraft = null;
+  nodeLabels = []; nodeList = [];
   clearGhost();
   updateHint();
 }
@@ -982,6 +988,8 @@ canvas.addEventListener('pointerdown', (e) => {
     if (c) { S.blockDraft = { a: c.c, b: c.c, normal: c.normal }; canvas.setPointerCapture(e.pointerId); updateHint(); updateGhost(e.offsetX, e.offsetY); }
     return;
   }
+  const nd = S.mode === 'edit' && S.tool === 'select' ? pickNode(e.offsetX, e.offsetY) : null;
+  if (nd) { S.nodeDrag = { sid: S.selected, i: nd.i, plus: nd.plus, x: e.offsetX, y: e.offsetY, moved: false, cand: null }; canvas.setPointerCapture(e.pointerId); return; }
   const giz = S.mode === 'edit' && S.tool === 'select' ? pickGizmo(e.offsetX, e.offsetY) : null;
   if (giz) { startGizmo(giz); canvas.setPointerCapture(e.pointerId); return; }
   const hit = S.tool === 'select' ? view.pickObject(e.offsetX, e.offsetY) : null;
@@ -1111,6 +1119,7 @@ function rotateSelected(deg) {
 }
 
 canvas.addEventListener('pointermove', (e) => {
+  if (S.nodeDrag) { updateNodeDrag(e.offsetX, e.offsetY); return; }
   if (S.resize) { updateResize(e.offsetX, e.offsetY); return; }
   if (S.move) { updateMove(e.offsetX, e.offsetY); return; }
   if (S.blockDraft) { dragBlock(e.offsetX, e.offsetY); return; }
@@ -1138,6 +1147,7 @@ function dragBlock(sx, sy) {
 
 canvas.addEventListener('pointerup', (e) => {
   if (!S.draw) typedReset();
+  if (S.nodeDrag) { endNodeDrag(); down = null; return; }
   if (S.drag) { S.drag = null; S.sim?.clearForces(); canvas.releasePointerCapture(e.pointerId); return; }
   if (S.resize) { const r = S.resize; S.resize = null; ghostLabels = []; if (r.undone) commit(); canvas.releasePointerCapture(e.pointerId); down = null; return; }
   if (S.move) { endMove(); canvas.releasePointerCapture(e.pointerId); down = null; return; }
@@ -1148,6 +1158,8 @@ canvas.addEventListener('pointerup', (e) => {
   down = null;
   if (moved) return;
   if (b === 2) { // right click without drag: step back, or take a block away
+    const nd = S.mode === 'edit' && S.tool === 'select' ? pickNode(e.offsetX, e.offsetY) : null;
+    if (nd && !nd.plus) { removeNode(nd.i); return; }
     if (S.draw) { S.draw = null; clearGhost(); updateHint(); }
     else if (S.stringDraft) finishString();
     else if (S.tool === 'block' && S.mode === 'edit') { eraseAt(e.offsetX, e.offsetY, true); updateGhost(e.offsetX, e.offsetY); }
@@ -1261,7 +1273,15 @@ window.addEventListener('keydown', (e) => {
   if (k === 'enter' && S.stringDraft) { finishString(); return; }
   if (k === ' ') { e.preventDefault(); startSim(); return; }
   if (k === 's') { toggleSchema(); return; }
-  if ((k === 'delete' || k === 'backspace') && S.mode === 'edit') { deleteSelection(); return; }
+  if (k === 'backspace' && S.stringDraft) {
+    // step back one point while drawing a string
+    S.stringDraft.anchors.pop();
+    if (!S.stringDraft.anchors.length && S.stringDraft.replaceId == null) S.stringDraft = null;
+    updateNodes(); updateHint();
+    if (lastMouse) updateGhost(lastMouse.x, lastMouse.y);
+    return;
+  }
+  if ((k === 'delete' || k === 'backspace') && S.mode === 'edit') { if (S.nodeSel != null && nodeString()) removeNode(S.nodeSel); else deleteSelection(); return; }
   if (k === 'h' && S.mode === 'edit') { if (e.shiftKey) { S.hidden.clear(); applyHidden(); } else hideSelection(); return; }
   if (NUDGE[k] && S.mode === 'edit' && S.selected !== null) { e.preventDefault(); nudgeSelected(NUDGE[k]); return; }
   if (k === 'r' && S.mode === 'edit') {
@@ -1280,9 +1300,11 @@ function showSelection() {
   drawStrings();
   renderLegend();
   renderInspector();
+  renderTree();
   updateGizmo();
 }
 function select(id, add = false) {
+  if (id !== S.selected) S.nodeSel = null;
   for (const i of selIds()) view.setHighlight(i, false);
   if (add && id !== null) {
     const cur = new Set(selIds());
@@ -1385,6 +1407,7 @@ const gizMat = AX_COL.map((c) => new THREE.MeshBasicMaterial({ color: c, depthTe
 const padMat = new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false, transparent: true, opacity: 0.92 });
 const yUp = new THREE.Vector3(0, 1, 0);
 function updateGizmo() {
+  updateNodes();
   gizmo.clear();
   if (S.mode !== 'edit' || S.tool !== 'select') return;
   const ids = new Set(selIds());
@@ -1558,6 +1581,157 @@ function exportStl() {
   toast(`${parts.length} ${parts.length === 1 ? 'pezzo esportato' : 'pezzi esportati'} in STL (millimetri).`);
 }
 
+// ------------------------------------------------------------------ string path as numbered nodes
+// A selected string shows the points it runs through as numbered nodes, in order. Drag a node onto
+// another hole, eyelet or pulley to move it; drag a "+" to make the string pass somewhere new;
+// right click (or Canc) takes a point away. The same numbers appear while a string is being drawn.
+let nodeLabels = [], nodeList = [];
+function anchorLabel(a) {
+  const part = a.part !== undefined ? S.doc.parts.find((p) => p.id === a.part) : null;
+  if (a.t === 'winch') return 'Verricello';
+  if (a.t === 'pulley') { const w = S.doc.pulleys.find((e) => e.id === a.id); return `Puleggia Ø ${w ? w.r * 2 : ''}`; }
+  if (a.t === 'guide') return `Occhiello · ${part ? partLabel(part).toLowerCase() : ''}, foro ${a.i + 1}`;
+  if (a.t === 'hole') return `Foro ${a.i + 1} · ${part ? partLabel(part).toLowerCase() : ''}`;
+  if (a.t === 'pt') return part ? partLabel(part) : 'Pezzo';
+  return a.t === 'board' ? 'Foro del muro' : 'Foro del pavimento';
+}
+function pathProblem(list) {
+  if (list.length < 2) return 'Un filo ha bisogno di almeno due punti.';
+  if (list[0].t === 'pulley' || list[list.length - 1].t === 'pulley') return 'Il filo non può iniziare o finire su una puleggia.';
+  if (list.some((a, i) => a.t === 'winch' && i > 0 && i < list.length - 1)) return 'Il verricello può stare solo a un capo del filo.';
+  if (list.some((a, i) => i > 0 && sameAnchor(a, list[i - 1]))) return 'Due punti uguali di seguito.';
+  return null;
+}
+function nodeString() {
+  if (S.mode !== 'edit') return null;
+  if (S.tool === 'string' && S.stringDraft) return { anchors: S.stringDraft.anchors, draft: true };
+  if (S.tool === 'select' && S.selected !== null && !S.multi.length) return S.doc.strings.find((x) => x.id === S.selected) || null;
+  return null;
+}
+function updateNodes() {
+  nodeLabels = []; nodeList = [];
+  const s = nodeString();
+  if (!s) { S.nodeSel = null; return; }
+  const pts = s.anchors.map((a) => anchorPos(S.doc, a));
+  pts.forEach((p, i) => {
+    if (!p) return;
+    nodeList.push({ i, plus: false, p });
+    nodeLabels.push({ text: String(i + 1), pos: [p.x, p.y, p.z], cls: 'node' + (i === S.nodeSel || i === S.nodeHot ? ' sel' : '') });
+  });
+  if (s.draft) return;
+  for (let i = 0; i + 1 < pts.length; i++) {
+    const a = pts[i], b = pts[i + 1];
+    if (!a || !b) continue;
+    const p = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 };
+    nodeList.push({ i, plus: true, p });
+    nodeLabels.push({ text: '+', pos: [p.x, p.y, p.z], cls: 'node plus' });
+  }
+}
+function pickNode(sx, sy) {
+  let best = null;
+  for (const n of nodeList) {
+    const q = view.project(n.p), d = Math.hypot(q.x - sx, q.y - sy) + (n.plus ? 3 : 0);
+    if (d < 13 && (!best || d < best.d)) best = { ...n, d };
+  }
+  return best;
+}
+function removeNode(i) {
+  const s = nodeString();
+  if (!s || s.draft) return;
+  const list = s.anchors.filter((_, k) => k !== i), bad = pathProblem(list);
+  if (bad) { toast(bad); return; }
+  pushUndo();
+  s.anchors = list;
+  S.nodeSel = null;
+  commit();
+}
+function updateNodeDrag(sx, sy) {
+  const d = S.nodeDrag, s = S.doc.strings.find((x) => x.id === d.sid);
+  if (!s) return;
+  if (Math.hypot(sx - d.x, sy - d.y) > 5) d.moved = true;
+  if (!d.moved) return;
+  clearGhost();
+  ghostLabels = [];
+  d.cand = null;
+  const h = hoverTarget(sx, sy, { wheels: true, guides: true, shafts: false });
+  const a = targetToAnchor(h), p = a && anchorPos(S.doc, a);
+  if (!p) return;
+  const list = s.anchors.map((x) => ({ ...x }));
+  if (d.plus) list.splice(d.i + 1, 0, a); else list[d.i] = a;
+  const at = d.plus ? d.i + 1 : d.i, bad = pathProblem(list);
+  if (h.t === 'pulley' || h.t === 'winch') {
+    const w = (h.t === 'pulley' ? S.doc.pulleys : S.doc.winches).find((e) => e.id === h.id);
+    ring({ ...h, sgn: view.facing(h.n, p) }, (w.r + 1.5) / HOLE());
+  } else ring(h, h.t === 'guide' ? 0.6 : 1);
+  const line = [list[at - 1], a, list[at + 1]].filter(Boolean).map((x) => anchorPos(S.doc, x)).filter(Boolean);
+  if (line.length >= 2) {
+    const l = new THREE.Line(new THREE.BufferGeometry().setFromPoints(line.map((q) => new THREE.Vector3(q.x, q.y, q.z))), ghostLineMat);
+    l.computeLineDistances();
+    l.renderOrder = 11;
+    ghost.add(l);
+  }
+  ghostLabels.push({ text: bad || `${at + 1} · ${anchorLabel(a)}`, pos: [p.x, p.y, p.z + 5], cls: bad ? 'warn' : 'ghost' });
+  if (!bad) d.cand = list;
+}
+function endNodeDrag() {
+  const d = S.nodeDrag, s = S.doc.strings.find((x) => x.id === d.sid);
+  S.nodeDrag = null;
+  clearGhost();
+  ghostLabels = [];
+  if (!s) return;
+  if (d.moved && d.cand) { pushUndo(); s.anchors = d.cand; S.nodeSel = d.plus ? d.i + 1 : d.i; commit(); return; }
+  if (!d.moved) {
+    if (d.plus) toast('Trascina il + su un foro, un occhiello o una puleggia: il filo passerà da lì.');
+    else S.nodeSel = S.nodeSel === d.i ? null : d.i;
+  }
+  updateNodes();
+  renderInspector();
+}
+// What a click of the string tool will do, said next to the cursor.
+function stringClickText(a) {
+  const list = S.stringDraft?.anchors || [];
+  if (!list.length) return a.t === 'winch' ? 'Parte dal verricello: filo motorizzato' : a.t === 'pulley' ? 'Non si parte da una puleggia' : '1 · lega qui l\'inizio';
+  const n = list.length + 1, last = list[list.length - 1];
+  if (sameAnchor(a, last)) return a.t === 'pulley' ? 'Cambia il lato della puleggia' : 'Clic: il filo finisce qui';
+  if (a.t === 'winch') return `${n} · finisce sul verricello`;
+  if (a.t === 'pulley') return `${n} · gira attorno alla puleggia da questo lato`;
+  if (a.t === 'guide') return `${n} · passa nell'occhiello`;
+  return `${n} · passa da qui (doppio clic: finisce qui)`;
+}
+
+// ------------------------------------------------------------------ object tree
+// What hangs from what, starting from the fixed base. Redrawn whenever the model or the selection changes.
+function renderTree() {
+  const el = $('tree');
+  if (!el) return;
+  const t = sceneTree(S.doc), sel = new Set(selIds());
+  $('treeSec').hidden = !S.doc.parts.length && !S.doc.strings.length;
+  el.innerHTML = '';
+  const row = (n, depth) => {
+    const d = document.createElement('div');
+    d.className = 'trow' + (sel.has(n.id) ? ' sel' : '');
+    d.style.paddingLeft = `${6 + depth * 14}px`;
+    d.innerHTML = `<span class="dot ${n.kind}" style="${n.color ? `background:${n.color}` : ''}"></span><span class="tl"></span><span class="tv"></span>`;
+    d.querySelector('.tl').textContent = n.label;
+    d.querySelector('.tv').textContent = n.via || '';
+    d.onmouseenter = () => { if (!selIds().includes(n.id)) view.setHighlight(n.id, true, 0x888888); };
+    d.onmouseleave = () => { if (!selIds().includes(n.id)) view.setHighlight(n.id, false); };
+    d.onclick = (e) => { if (S.mode === 'edit' && S.tool !== 'select') setTool('select'); select(n.id, e.shiftKey); };
+    el.appendChild(d);
+    for (const c of n.children || []) row(c, depth + 1);
+  };
+  const head = (text, cls, count) => { const h = document.createElement('div'); h.className = 'thead2 ' + (cls || ''); h.innerHTML = `<span></span><small>${count}</small>`; h.firstChild.textContent = text; el.appendChild(h); };
+  const size = (list) => list.reduce((a, n) => a + 1 + size(n.children || []), 0);
+  head('Base fissa: muro e pavimento', '', size(t.fixed));
+  if (!t.fixed.length) { const p = document.createElement('p'); p.className = 'empty'; p.textContent = 'Niente è ancora fissato alla base.'; el.appendChild(p); }
+  t.fixed.forEach((n) => row(n, 1));
+  if (t.loose.length) { head('Non fissati: cadranno', 'warn', size(t.loose)); t.loose.forEach((n) => row(n, 1)); }
+  if (t.strings.length) {
+    head('Fili', '', t.strings.length);
+    for (const st of t.strings) row({ id: st.id, kind: 'string', label: stringName(S.doc.strings.find((x) => x.id === st.id)), via: st.via }, 1);
+  }
+}
+
 // ------------------------------------------------------------------ guided tutorial
 // Started on request. Each step asks for one thing, notices when it is done and moves on;
 // "Fallo tu" does the step for you, so nobody gets stuck.
@@ -1612,13 +1786,15 @@ const TOUR = [
       S.doc.poses = [-60, 60].map((a) => ({ winch: {}, servo: Object.fromEntries(ids.map((id, k) => [id, k % 2 ? -a : a])) }));
       markDirty(); renderSeq();
       if (S.mode !== 'run') startSim();
-      if (S.mode === 'run') { S.paused = false; S.seq = { i: 0, t: 0 }; syncRunUI(); renderSeq(); }
+      if (S.mode === 'run') { S.paused = false; S.seq = { i: 0, t: 0, paused: false }; syncRunUI(); renderSeq(); }
     } },
   { t: 'Fatto! Cos\'altro c\'è',
     h: `<ul>
       <li><b>Unisci</b> <kbd>J</kbd>: foro di una trave, poi foro di destinazione, e la trave ci va da sola.</li>
       <li><b>Perno</b> <kbd>P</kbd>: unisce due pezzi su un foro. Un altro clic lo blocca o lo motorizza.</li>
       <li><b>Puleggia</b> <kbd>U</kbd>, <b>Verricello</b> <kbd>W</kbd> e <b>Filo</b> <kbd>F</kbd>: per dita e tendini. Guarda <i>Esempi, Dito con elastici</i>.</li>
+      <li>Un <b>filo</b> selezionato mostra il percorso a <b>numeri</b>: trascinali per spostare un punto, trascina un <b>+</b> per aggiungerne uno, clic destro lo toglie.</li>
+      <li><b>Albero</b> nel pannello: cosa è attaccato a cosa. Un clic seleziona il pezzo.</li>
       <li><b>Metro</b> <kbd>T</kbd> misura, <b>Baricentro</b> mostra dove pesa, <kbd>H</kbd> nasconde un pezzo.</li>
       <li><b>Distinta pezzi</b> in fondo al pannello, <b>STL</b> e JSON nel menu File.</li>
       <li><kbd>Ctrl</kbd>+<kbd>Z</kbd> annulla sempre. I progetti si salvano da soli.</li>
@@ -1696,11 +1872,25 @@ function renderSeq() {
   row.appendChild(add);
   el.appendChild(row);
   if (poses.length >= 2) {
+    const bar = document.createElement('div');
+    bar.className = 'seqbar';
     const play = document.createElement('button');
     play.className = 'primary';
-    play.textContent = S.seq ? '■ Ferma la sequenza' : '▶ Riproduci in sequenza';
-    play.onclick = () => { if (S.seq) stopSeq(); else { if (S.mode !== 'run') startSim(); if (S.mode === 'run') { S.paused = false; S.seq = { i: 0, t: 0 }; syncRunUI(); } } renderSeq(); };
-    el.appendChild(play);
+    const going = S.seq && !S.seq.paused;
+    play.textContent = going ? '❚❚ Pausa' : S.seq ? '▶ Riprendi' : '▶ Riproduci';
+    play.title = going ? 'Ferma la sequenza dove si trova' : 'Ripete le pose una dopo l\'altra';
+    play.onclick = () => {
+      if (S.seq) S.seq.paused = !S.seq.paused;
+      else { if (S.mode !== 'run') startSim(); if (S.mode === 'run') { S.paused = false; S.seq = { i: 0, t: 0, paused: false }; syncRunUI(); } }
+      renderSeq();
+    };
+    const stop = document.createElement('button');
+    stop.textContent = '■ Stop';
+    stop.title = 'Ferma la sequenza e torna alla prima posa';
+    stop.disabled = !S.seq;
+    stop.onclick = () => { S.seq = null; S.controls = clonePose(poses[0]); S.sim?.setControls(S.controls); renderControls(); renderSeq(); };
+    bar.append(play, stop);
+    el.appendChild(bar);
   } else {
     const p = document.createElement('p');
     p.className = 'empty';
@@ -1712,6 +1902,7 @@ function stopSeq() { if (S.seq) { S.seq = null; renderSeq(); } }
 function stepSeq(dt) {
   const poses = S.doc.poses || [], q = S.seq;
   if (!q || poses.length < 2) { S.seq = null; return; }
+  if (q.paused) return;
   const MOVE = 1.0, HOLD = 0.5;
   q.t += dt;
   const a = poses[q.i % poses.length], b = poses[(q.i + 1) % poses.length];
@@ -1754,7 +1945,7 @@ $('panel').addEventListener('wheel', (e) => {
 }, { passive: false });
 
 // ------------------------------------------------------------------ side panel
-function renderPanel() { renderControls(); renderSeq(); renderLegend(); renderInspector(); renderWarnings(); renderModel(); }
+function renderPanel() { renderControls(); renderSeq(); renderLegend(); renderInspector(); renderTree(); renderWarnings(); renderModel(); }
 
 function stringName(s) {
   if (s.name) return s.name;
@@ -2084,7 +2275,6 @@ function renderInspector() {
     const nm = add(`<div class="prop"><label for="strName">Nome</label><input id="strName" value="${escapeHtml(o.name || '')}" placeholder="es. Flessore" style="width:150px;padding:5px 6px;border:1px solid var(--line);border-radius:6px;background:var(--raised)" ${editable ? '' : 'disabled'}></div>`);
     nm.querySelector('input').onchange = (e) => { pushUndo(); o.name = e.target.value.slice(0, 40); commit(); };
     segProp(['string', 'elastic'].map((t) => [t, STRING_LABEL[t]]), o.kind, (t) => { o.kind = t; if (t === 'elastic') { o.stiffness ??= 60; o.pretension ??= 3; } });
-    info('Passa per', `${o.anchors.length} punti`);
     const onWinch = o.anchors[0]?.t === 'winch' || o.anchors[o.anchors.length - 1]?.t === 'winch';
     if (onWinch) {
       add('<p class="empty">Sul tamburo del verricello questo filo:</p>');
@@ -2102,8 +2292,20 @@ function renderInspector() {
     if (S.mode === 'run' && S.sim) info('Tensione', `${fmt(S.sim.tension(o.id), 2)} N`);
     const count = (...t) => o.anchors.filter((a) => t.includes(a.t)).length;
     const parts = [[count('guide'), 'occhiell', 'o', 'i'], [count('pulley'), 'puleg', 'gia', 'ge'], [count('hole', 'pt', 'board', 'world'), 'for', 'o', 'i']].filter((x) => x[0]).map(([n, w, s1, sp]) => `${n} ${w}${n === 1 ? s1 : sp}`);
-    add(`<p class="empty">Passa da ${parts.join(', ') || 'due punti'}.</p>`);
-    const rb = add(`<button ${editable ? '' : 'disabled'}>Rifai il percorso</button>`);
+    add('<h3 class="sub">Percorso</h3>');
+    const ol = add('<ol class="path"></ol>');
+    o.anchors.forEach((a, i) => {
+      const li = document.createElement('li');
+      li.className = i === S.nodeSel ? 'sel' : '';
+      li.innerHTML = `<span class="pn">${i + 1}</span><span class="pl"></span><button class="px" title="Togli questo punto" ${editable ? '' : 'disabled'}>×</button>`;
+      li.querySelector('.pl').textContent = anchorLabel(a);
+      li.onmouseenter = () => { S.nodeHot = i; updateNodes(); };
+      li.onmouseleave = () => { S.nodeHot = null; updateNodes(); };
+      li.onclick = (e) => { if (e.target.classList.contains('px')) { S.nodeHot = null; removeNode(i); return; } S.nodeSel = S.nodeSel === i ? null : i; updateNodes(); renderInspector(); };
+      ol.appendChild(li);
+    });
+    if (editable) add('<p class="empty">Nella scena: <b>trascina un numero</b> su un altro foro, occhiello o puleggia per spostare quel punto. <b>Trascina un +</b> per far passare il filo da un punto nuovo. <b>Clic destro</b> su un numero lo toglie.</p>');
+    const rb = add(`<button ${editable ? '' : 'disabled'}>Rifai il percorso da capo</button>`);
     rb.title = 'Riclicca i punti da cui passa: il filo tiene nome e impostazioni';
     rb.onclick = () => { setTool('string'); S.stringDraft = { kind: o.kind, anchors: [], replaceId: o.id }; updateHint(); };
     delBtn();
@@ -2280,7 +2482,7 @@ function frame(now) {
     }
   } else if (now - labelT > 100) {
     labelT = now;
-    view.setLabels([...ghostLabels, ...(S.measure?.b && S.measure.label ? [S.measure.label] : []), ...(S.showCom && S.comLabel ? [S.comLabel] : [])]);
+    view.setLabels([...nodeLabels, ...ghostLabels, ...(S.measure?.b && S.measure.label ? [S.measure.label] : []), ...(S.showCom && S.comLabel ? [S.comLabel] : [])]);
   }
   view.render();
   cube.render();

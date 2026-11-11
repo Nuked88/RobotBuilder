@@ -2,7 +2,7 @@
 // bill of materials, interference check. Pure functions on the document.
 import {
   P, isBeam, isBlock, isServo, fam, pinMembers, mountOf, shiftItem, docBounds, solidBox, boxesOverlap, holeWorld, partLabel,
-  PIN_LABEL, SERVO_MODELS, FLOOR,
+  PIN_LABEL, SERVO_MODELS, FLOOR, glueLinks, shaftMembers,
 } from './model.js';
 
 const COLLS = ['parts', 'pins', 'pulleys', 'winches', 'strings'];
@@ -154,4 +154,57 @@ export function interferences(doc) {
     }
   }
   return out.slice(0, 8);
+}
+
+// The scene as a tree: what hangs from what, starting from the fixed base (wall and baseplate).
+// {fixed: [node], loose: [node], strings: [{id, via}]}, node = {id, kind, label, color, via, children}.
+export function sceneTree(doc) {
+  const adj = new Map();
+  const link = (a, b, ab, ba = ab) => {
+    for (const [x, y, via] of [[a, b, ab], [b, a, ba]]) { if (!adj.has(x)) adj.set(x, []); adj.get(x).push({ to: y, via }); }
+  };
+  const byId = new Map(doc.parts.map((p) => [p.id, p]));
+  for (const pin of doc.pins) {
+    const mem = pinMembers(doc, pin).map((m) => (m.kind === 'part' ? m.part.id : 'G'));
+    for (let i = 0; i + 1 < mem.length; i++) if (mem[i] !== mem[i + 1]) link(mem[i], mem[i + 1], PIN_LABEL[pin.type].toLowerCase());
+  }
+  for (const [a, b] of glueLinks(doc)) link(a, b, [a, b].some((id) => id !== 'G' && isServo(byId.get(id))) ? 'montato' : 'incollato');
+  for (const s of doc.parts) if (isServo(s)) for (const m of shaftMembers(doc, s)) link(s.id, m.id, 'gira sull\'albero', 'servo che lo muove');
+  const wheels = new Map();
+  const loose = [], fixedWheels = [];
+  for (const [list, kind] of [[doc.pulleys, 'pulley'], [doc.winches, 'winch']]) {
+    for (const w of list) {
+      const m = mountOf(doc, w);
+      const node = { id: w.id, kind, label: kind === 'pulley' ? `Puleggia Ø ${w.r * 2}` : 'Verricello' + (w.model ? ' ' + w.model : ''), via: 'montato', children: [] };
+      if (m.kind === 'part') { if (!wheels.has(m.part.id)) wheels.set(m.part.id, []); wheels.get(m.part.id).push(node); }
+      else if (m.kind === 'board') fixedWheels.push(node);
+      else loose.push({ ...node, via: '' });
+    }
+  }
+  const seen = new Set();
+  const grow = (id, via) => {
+    seen.add(id);
+    const p = byId.get(id);
+    const node = { id, kind: 'part', label: partLabel(p), color: isServo(p) ? '#31343a' : p.color, via, children: [] };
+    // breadth first, so every piece hangs from the one closest to the base
+    const next = (adj.get(id) || []).filter((e) => e.to !== 'G' && !seen.has(e.to));
+    for (const e of next) seen.add(e.to);
+    for (const e of next) node.children.push(grow(e.to, e.via));
+    node.children.push(...(wheels.get(id) || []));
+    return node;
+  };
+  const roots = (adj.get('G') || []).filter((e, i, l) => l.findIndex((x) => x.to === e.to) === i);
+  for (const e of roots) seen.add(e.to);
+  const fixed = roots.map((e) => grow(e.to, e.via));
+  fixed.push(...fixedWheels);
+  for (const p of doc.parts) if (!seen.has(p.id)) loose.push(grow(p.id, ''));
+  const strings = doc.strings.map((s) => {
+    const n = (t) => s.anchors.filter((a) => t.includes(a.t)).length;
+    const bits = [];
+    if (n(['winch'])) bits.push('verricello');
+    if (n(['pulley'])) bits.push(`${n(['pulley'])} pul.`);
+    if (n(['guide'])) bits.push(`${n(['guide'])} occh.`);
+    return { id: s.id, via: bits.join(' · ') || `${s.anchors.length} punti` };
+  });
+  return { fixed, loose, strings };
 }
