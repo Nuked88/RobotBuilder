@@ -42,7 +42,7 @@ Idee prese dai CAD veri (SolidWorks e simili), ridotte a un clic.
 - **Occhielli facili**: con il Filo basta puntare di fianco a una trave e l'occhiello più vicino si aggancia da solo; tutti gli occhielli di quella trave si illuminano.
 - **Schede a destra**: Pezzo, Comandi, Albero, Libreria, Distinta. Gli avvisi restano sempre visibili in basso.
 - **Libreria**: gruppi pronti (servo con leva, braccio a due servo, dito con elastici, dito a cinghia) inseriti accanto al modello con un clic.
-- **Anelli di rotazione**: accanto alle frecce, un anello per asse gira il pezzo o tutta la selezione col mouse; in alternativa `Shift` + tasto destro trascinato accanto a una freccia gira attorno a quell'asse (15° per le travi nel loro piano, quarti di giro per il resto); mentre giri puoi scrivere i gradi. `R` e i pulsanti in scheda fanno lo stesso, anche per pulegge e verricelli.
+- **Mano: Sposta o Ruota**: la barra in alto a sinistra (o il tasto `Q`) sceglie cosa mostra la Mano. In Sposta ci sono frecce e piastrine, in Ruota tre anelli: tiri un anello nel verso in cui vuoi girare (15° per le travi nel loro piano, quarti di giro per il resto) e puoi scrivere i gradi. Se il pezzo finirebbe nel muro o nel pavimento viene spostato fuori. In alternativa `Shift` + tasto destro trascinato accanto a una freccia. `R` e i pulsanti in scheda fanno lo stesso, anche per pulegge e verricelli.
 - **Selezione a riquadro** (`Shift` + trascina nel vuoto), **copia e incolla** (`Ctrl+C`, `Ctrl+V`) e **nomi dei pezzi**, che compaiono nell'albero.
 - **Peso di prova** su un blocco, per simulare un carico, e **picco di coppia** di ogni servo durante la prova.
 - **Metro** (T): due clic e leggi la distanza in millimetri e in fori.
