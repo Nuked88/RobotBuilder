@@ -566,7 +566,7 @@ export class View {
     if (!winchAtStart && !winchAtEnd) { if (marks) marks.visible = false; if (line.userData.arrow) line.userData.arrow.visible = false; return; }
     const path = winchAtStart ? pts : [...pts].reverse(); // from the winch to the tied end
     if (!marks) {
-      const geo = new THREE.ConeGeometry(1.5, 3.6, 10);
+      const geo = new THREE.ConeGeometry(0.95, 2.6, 10);
       const mat = new THREE.MeshBasicMaterial({ color, depthTest: false, transparent: true });
       marks = new THREE.InstancedMesh(geo, mat, 160);
       marks.renderOrder = 5;

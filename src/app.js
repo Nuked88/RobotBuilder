@@ -259,6 +259,7 @@ function reportSnaps() {
   toast('Un filo scatta su una puleggia: guarda «Da controllare»');
 }
 
+let nodeLabels = [], nodeList = [], nodesReady = false;
 function drawStrings() {
   const sim = S.mode === 'run' ? S.sim : S.preview;
   const paths = new Map(), tensions = {};
@@ -273,6 +274,7 @@ function drawStrings() {
     }
   }
   view.syncStrings(paths, tensions, S.mode === 'run' ? sim : null);
+  if (S.mode === 'edit' && nodesReady) updateNodes();
   return { paths, tensions };
 }
 
@@ -1803,7 +1805,7 @@ function exportStl() {
 // A selected string shows the points it runs through as numbered nodes, in order. Drag a node onto
 // another hole, eyelet or pulley to move it; drag a "+" to make the string pass somewhere new;
 // right click (or Canc) takes a point away. The same numbers appear while a string is being drawn.
-let nodeLabels = [], nodeList = [];
+
 function anchorLabel(a) {
   const part = a.part !== undefined ? S.doc.parts.find((p) => p.id === a.part) : null;
   if (a.t === 'winch') return 'Verricello';
@@ -1826,21 +1828,53 @@ function nodeString() {
   if (S.tool === 'select' && S.selected !== null && !S.multi.length) return S.doc.strings.find((x) => x.id === S.selected) || null;
   return null;
 }
+// Nodes sit on the string as it is really drawn. A pulley the string is not touching right now
+// (it only leans on it when the joint bends) gets a dashed leader from its number to its rim.
+const nodeLeaders = new THREE.LineSegments(new THREE.BufferGeometry(), new THREE.LineDashedMaterial({ color: 0x8a94a6, dashSize: 1.6, gapSize: 1.2, depthTest: false, transparent: true }));
+nodeLeaders.renderOrder = 18; nodeLeaders.frustumCulled = false; nodeLeaders.raycast = () => {};
+view.scene.add(nodeLeaders);
+nodesReady = true;
+function onPath(path, p) {
+  let best = null, run = 0;
+  for (let k = 0; k + 1 < path.length; k++) {
+    const a = path[k], b = path[k + 1], v = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], L2 = v[0] * v[0] + v[1] * v[1] + v[2] * v[2], L = Math.sqrt(L2);
+    const t = L2 ? clamp(((p.x - a[0]) * v[0] + (p.y - a[1]) * v[1] + (p.z - a[2]) * v[2]) / L2, 0, 1) : 0;
+    const q = { x: a[0] + v[0] * t, y: a[1] + v[1] * t, z: a[2] + v[2] * t }, d = Math.hypot(q.x - p.x, q.y - p.y, q.z - p.z);
+    if (!best || d < best.d) best = { q, d, s: run + L * t };
+    run += L;
+  }
+  return best;
+}
+function pathAt(path, s) {
+  for (let k = 0; k + 1 < path.length; k++) {
+    const a = path[k], b = path[k + 1], L = Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+    if (s <= L || k + 2 === path.length) { const t = L ? clamp(s / L, 0, 1) : 0; return { x: a[0] + (b[0] - a[0]) * t, y: a[1] + (b[1] - a[1]) * t, z: a[2] + (b[2] - a[2]) * t }; }
+    s -= L;
+  }
+  return null;
+}
 function updateNodes() {
   nodeLabels = []; nodeList = [];
+  const lead = [];
+  const done = () => { nodeLeaders.geometry.dispose(); nodeLeaders.geometry = new THREE.BufferGeometry().setFromPoints(lead); nodeLeaders.computeLineDistances(); nodeLeaders.visible = lead.length > 0; };
   const s = nodeString();
-  if (!s) { S.nodeSel = null; return; }
-  const pts = s.anchors.map((a) => anchorPos(S.doc, a));
+  if (!s) { S.nodeSel = null; done(); return; }
+  const raw = s.anchors.map((a) => anchorPos(S.doc, a));
+  const path = !s.draft && S.mode === 'edit' ? view.stringLines.get(s.id)?.userData.pts : null;
+  const on = raw.map((p) => (p && path && path.length > 1 ? onPath(path, p) : null));
+  const pts = raw.map((p, i) => (on[i] ? on[i].q : p));
   pts.forEach((p, i) => {
     if (!p) return;
     nodeList.push({ i, plus: false, p });
     nodeLabels.push({ text: String(i + 1), pos: [p.x, p.y, p.z], cls: 'node' + (i === S.nodeSel || i === S.nodeHot ? ' sel' : '') });
+    if (on[i] && on[i].d > 2) lead.push(new THREE.Vector3(p.x, p.y, p.z), new THREE.Vector3(raw[i].x, raw[i].y, raw[i].z));
   });
+  done();
   if (s.draft) return;
   for (let i = 0; i + 1 < pts.length; i++) {
     const a = pts[i], b = pts[i + 1];
     if (!a || !b) continue;
-    const p = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 };
+    const p = (on[i] && on[i + 1] && pathAt(path, (on[i].s + on[i + 1].s) / 2)) || { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 };
     nodeList.push({ i, plus: true, p });
     nodeLabels.push({ text: '+', pos: [p.x, p.y, p.z], cls: 'node plus' });
   }
