@@ -106,35 +106,59 @@
   </main>
 
   <aside class="panel" id="panel">
-    <section>
-      <h2>Comandi</h2>
-      <div id="controls" class="controls"></div>
-    </section>
-    <section id="seqSec" hidden>
-      <h2>Sequenza di pose</h2>
-      <div id="seq" class="seq"></div>
-    </section>
-    <section id="legendSec" hidden>
-      <h2>Fili</h2>
-      <ul id="legend" class="legend"></ul>
-    </section>
-    <section>
-      <h2 id="inspTitle">Selezione</h2>
-      <div id="inspector" class="inspector"></div>
-    </section>
-    <section id="treeSec" hidden>
-      <h2>Albero: cosa è attaccato a cosa</h2>
-      <div id="tree" class="tree"></div>
-    </section>
-    <section id="warnSec" hidden>
+    <nav class="tabs" id="tabs" role="tablist" aria-label="Schede del pannello">
+      <button data-tab="props" role="tab" title="Proprietà del pezzo selezionato">Pezzo</button>
+      <button data-tab="controls" role="tab" class="on" title="Slider dei motori, sequenza di pose, fili">Comandi</button>
+      <button data-tab="tree" role="tab" title="Cosa è attaccato a cosa">Albero</button>
+      <button data-tab="lib" role="tab" title="Gruppi pronti da inserire">Libreria</button>
+      <button data-tab="model" role="tab" title="Distinta pezzi e peso">Distinta</button>
+    </nav>
+    <div class="tabpane" data-pane="props" hidden>
+      <section>
+        <h2 id="inspTitle">Selezione</h2>
+        <div id="inspector" class="inspector"></div>
+      </section>
+    </div>
+    <div class="tabpane" data-pane="controls">
+      <section>
+        <h2>Comandi</h2>
+        <div id="controls" class="controls"></div>
+      </section>
+      <section id="seqSec" hidden>
+        <h2>Sequenza di pose</h2>
+        <div id="seq" class="seq"></div>
+      </section>
+      <section id="legendSec" hidden>
+        <h2>Fili</h2>
+        <ul id="legend" class="legend"></ul>
+      </section>
+    </div>
+    <div class="tabpane" data-pane="tree" hidden>
+      <section id="treeSec" hidden>
+        <h2>Cosa è attaccato a cosa</h2>
+        <div id="tree" class="tree"></div>
+      </section>
+      <p class="empty whenempty">Qui compare l'albero del modello appena posi il primo pezzo.</p>
+    </div>
+    <div class="tabpane" data-pane="lib" hidden>
+      <section>
+        <h2>Gruppi pronti</h2>
+        <p class="empty">Un clic e il gruppo compare accanto al tuo modello, già selezionato: trascinalo, uniscilo, specchialo.</p>
+        <div id="lib" class="lib"></div>
+      </section>
+    </div>
+    <div class="tabpane" data-pane="model" hidden>
+      <section id="modelSec" hidden>
+        <h2>Distinta pezzi</h2>
+        <div id="massInfo" class="prop"></div>
+        <ul id="bom" class="bom"></ul>
+        <button id="btnBomCsv">Scarica la distinta (CSV)</button>
+      </section>
+      <p class="empty whenempty">Qui compaiono i pezzi che servono e il peso totale.</p>
+    </div>
+    <section id="warnSec" class="pinned" hidden>
       <h2>Da controllare</h2>
       <ul id="warnings" class="warnings"></ul>
-    </section>
-    <section id="modelSec" hidden>
-      <h2>Distinta pezzi</h2>
-      <div id="massInfo" class="prop"></div>
-      <ul id="bom" class="bom"></ul>
-      <button id="btnBomCsv">Scarica la distinta (CSV)</button>
     </section>
   </aside>
 

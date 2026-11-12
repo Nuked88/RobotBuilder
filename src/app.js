@@ -11,7 +11,7 @@ import {
   P, BEAM_W, LAYER, rad, emptyDoc, holePos, holeAt, holeIndexAt, layerBehind, pinAt, pinMembers, findById, prune, BEAM_COLORS, BLOCK_COLORS, PIN_LABEL,
   STRING_LABEL, BOARD, FLOOR, EPS, guidePos, anchorPos, mountOf, fam, NVEC, toWorld, toFam, famQuat, isBeam, isBlock, isServo, holeWorld,
   guideWorld, wheelWorld, worldToLocal, partPose, SERVO_MODELS, servoSpec, PULLEY_SIZES, winchForce, solidBox, boxesOverlap, glueLinks,
-  shaftMembers, shiftItem, partLabel,
+  shaftMembers, shiftItem, partLabel, docBounds,
 } from './model.js';
 
 const $ = (id) => document.getElementById(id);
@@ -31,6 +31,7 @@ const S = {
   servoModel: 'SG90',
   servoAngle: 0,
   pulleyR: 6,
+  tab: 'controls', peak: {},
   tour: null,          // guided tutorial: {i, doneAt, was}
   nodeSel: null, nodeHot: null, nodeDrag: null, // string path editing
   typed: { v: '', a: '', f: 0 }, // dimension being typed: value, angle, active field
@@ -73,8 +74,8 @@ const HINTS = {
   pin: 'Clicca un foro per metterci un perno: unisce il pezzo con quello che c\'è dietro. Clicca un perno esistente per <b>cambiarne il tipo</b>.',
   servo: 'Clicca un foro per montarci il <b>servo</b>: l\'albero esce verso di te. <b>R</b> gira il corpo. Poi appoggia una trave o un blocco sull\'albero: è quello che il servo fa girare.',
   pulley: 'Clicca un foro per montarci una <b>puleggia</b>: il filo ci gira attorno e cambia direzione.',
-  string0: 'Clicca il punto di partenza del filo: un <b>verricello</b> (filo motorizzato) o un foro.',
-  string1: 'Clicca in ordine i punti da cui passa: fori, <b>occhielli</b> ai lati delle travi, pulegge (dal <b>lato</b> in cui vuoi il filo). I numeri mostrano il percorso. <b>Backspace</b> toglie l\'ultimo punto, doppio clic o <b>Invio</b> chiude, <b>Esc</b> annulla.',
+  string0: 'Clicca il punto di partenza del filo: un <b>verricello</b> (filo motorizzato) o un foro. Per un <b>occhiello</b> punta <b>di fianco alla trave</b>: si aggancia da solo.',
+  string1: 'Clicca in ordine i punti da cui passa: fori, <b>occhielli</b> (punta di fianco alla trave), pulegge (dal <b>lato</b> in cui vuoi il filo). I numeri mostrano il percorso. <b>Backspace</b> toglie l\'ultimo punto, doppio clic o <b>Invio</b> chiude, <b>Esc</b> annulla.',
   winch: 'Clicca un foro per montare un <b>verricello</b>: poi partici con un filo e lo comandi con lo slider.',
   erase: 'Clicca quello che vuoi togliere.',
   reroute: 'Rifai il percorso: clicca di nuovo, in ordine, tutti i punti da cui passa il filo (verricello, fori, <b>occhielli</b>, pulegge). <b>Esc</b> lascia il percorso di prima.',
@@ -290,6 +291,8 @@ function startSim() {
   S.paused = false;
   S.warnings = S.sim.warnings;
   S.snapsShown = 0;
+  S.peak = {};
+  if (S.tab !== 'controls') setTab('controls');
   renderWarnings();
   syncRunUI();
   renderPanel();
@@ -384,13 +387,15 @@ function hoverTarget(sx, sy, opts = {}) {
   }
 
   let best = null;
-  const consider = (cand, p, lim) => {
+  const consider = (cand, p, lim, bonus = 0) => {
     const s = view.project(p);
-    const d = Math.hypot(sx - s.x, sy - s.y);
+    let d = Math.hypot(sx - s.x, sy - s.y);
     if (d >= lim) return;
+    const rd = d;
+    d = Math.max(0, d - bonus);
     const depth = depthOf(p);
     if (depth > surf.distance + 6) return; // hidden behind something
-    if (!best || d < best.d - 3 || (Math.abs(d - best.d) <= 3 && depth < best.depth)) best = { ...cand, d, depth };
+    if (!best || d < best.d - 3 || (Math.abs(d - best.d) <= 3 && depth < best.depth)) best = { ...cand, d, rd, depth };
   };
   for (const part of doc.parts) {
     if (S.hidden.has(part.id)) continue;
@@ -398,6 +403,22 @@ function hoverTarget(sx, sy, opts = {}) {
       const n = fam(part);
       if (!famOk(n)) continue;
       const sgn = view.facing(n, holeWorld(part, 0));
+      if (opts.guides) {
+        // the strip along each edge of a beam belongs to its eyelets: point beside the beam, not at
+        // the tiny ring, and the nearest eyelet on that side is taken
+        const fp = view.famPoint(sx, sy, n, part.layer + sgn * 0.45);
+        // not when another piece is what you are really pointing at
+        const other = surf.id !== undefined && surf.id !== part.id && doc.parts.some((q) => q.id === surf.id);
+        if (fp && !other) {
+          const a = rad(part.angle), dx = fp.x - part.x, dz = fp.z - part.z;
+          const u = dx * Math.cos(a) + dz * Math.sin(a), v = -dx * Math.sin(a) + dz * Math.cos(a);
+          if (Math.abs(v) > 2.4 && Math.abs(v) < 8.5 && u > -P / 2 && u < (part.holes - 0.5) * P) {
+            const i = clamp(Math.round(u / P), 0, part.holes - 1), side = Math.sign(v);
+            const q = guidePos(part, i, side);
+            consider({ t: 'guide', part, i, side, n, x: q.x, z: q.z, layer: part.layer, sgn, zone: true }, facePoint(n, q.x, q.z, part.layer, sgn), 40, 40);
+          }
+        }
+      }
       for (let i = 0; i < part.holes; i++) {
         const h = holePos(part, i);
         consider({ t: 'hole', part, i, n, x: h.x, z: h.z, layer: part.layer, sgn }, facePoint(n, h.x, h.z, part.layer, sgn), 13);
@@ -412,7 +433,7 @@ function hoverTarget(sx, sy, opts = {}) {
     }
   }
   // a wheel wins unless the cursor sits right on a hole
-  if (wheel && !(best && best.d < 5 && best.d < wheel.d)) return wheel;
+  if (wheel && !(best && best.rd < 5 && best.d < wheel.d)) return wheel;
   if (best) return best;
   if (!surf.point) return null;
 
@@ -476,6 +497,24 @@ function ring(h, scale = 1) {
   m.scale.setScalar(scale);
   m.renderOrder = 10;
   ghost.add(m);
+}
+
+// Faint rings on every eyelet of a beam, so you see where a string can be threaded.
+const ringDimMat = new THREE.MeshBasicMaterial({ color: 0xf2b51c, depthTest: false, transparent: true, opacity: 0.45 });
+function showEyelets(h) {
+  const part = h?.part;
+  if (!part || !isBeam(part)) return;
+  for (let i = 0; i < part.holes; i++) for (const side of [1, -1]) {
+    if (h.t === 'guide' && h.i === i && h.side === side) continue;
+    const q = guidePos(part, i, side);
+    const m = new THREE.Mesh(ringGeo, ringDimMat);
+    const p = facePoint(fam(part), q.x, q.z, part.layer, h.sgn, 0.4);
+    m.position.set(p.x, p.y, p.z);
+    setQ(m, famQuat(fam(part)));
+    m.scale.setScalar(0.5);
+    m.renderOrder = 10;
+    ghost.add(m);
+  }
 }
 
 // Box of cells from a to b (lattice points, any order): {c: first cell, s: size in cells}.
@@ -618,7 +657,7 @@ function updateGhost(sx, sy) {
         if (h.t === 'pulley' || h.t === 'winch') {
           const w = (h.t === 'pulley' ? S.doc.pulleys : S.doc.winches).find((e) => e.id === h.id);
           ring({ ...h, sgn: view.facing(h.n, p) }, (w.r + 1.5) / HOLE());
-        } else ring(h, h.t === 'guide' ? 0.6 : 1);
+        } else { ring(h, h.t === 'guide' ? 0.75 : 1); showEyelets(h); }
         ghostLabels.push({ text: stringClickText(a), pos: [p.x, p.y, p.z + 5], cls: 'ghost' });
       }
     }
@@ -1305,6 +1344,7 @@ function showSelection() {
 }
 function select(id, add = false) {
   if (id !== S.selected) S.nodeSel = null;
+  if (id !== null && S.tab !== 'tree' && S.tab !== 'props') setTab('props');
   for (const i of selIds()) view.setHighlight(i, false);
   if (add && id !== null) {
     const cur = new Set(selIds());
@@ -1316,6 +1356,7 @@ function select(id, add = false) {
   showSelection();
 }
 function selectMany(ids) {
+  if (ids.length && S.tab !== 'tree' && S.tab !== 'props') setTab('props');
   for (const i of selIds()) view.setHighlight(i, false);
   S.multi = ids.length > 1 ? [...ids] : [];
   S.selected = ids[0] ?? null;
@@ -1662,7 +1703,7 @@ function updateNodeDrag(sx, sy) {
   if (h.t === 'pulley' || h.t === 'winch') {
     const w = (h.t === 'pulley' ? S.doc.pulleys : S.doc.winches).find((e) => e.id === h.id);
     ring({ ...h, sgn: view.facing(h.n, p) }, (w.r + 1.5) / HOLE());
-  } else ring(h, h.t === 'guide' ? 0.6 : 1);
+  } else { ring(h, h.t === 'guide' ? 0.75 : 1); showEyelets(h); }
   const line = [list[at - 1], a, list[at + 1]].filter(Boolean).map((x) => anchorPos(S.doc, x)).filter(Boolean);
   if (line.length >= 2) {
     const l = new THREE.Line(new THREE.BufferGeometry().setFromPoints(line.map((q) => new THREE.Vector3(q.x, q.y, q.z))), ghostLineMat);
@@ -1697,6 +1738,71 @@ function stringClickText(a) {
   if (a.t === 'pulley') return `${n} · gira attorno alla puleggia da questo lato`;
   if (a.t === 'guide') return `${n} · passa nell'occhiello`;
   return `${n} · passa da qui (doppio clic: finisce qui)`;
+}
+
+// ------------------------------------------------------------------ panel tabs
+const TABS = ['props', 'controls', 'tree', 'lib', 'model'];
+function setTab(t) {
+  S.tab = t;
+  document.querySelectorAll('#tabs button').forEach((b) => { const on = b.dataset.tab === t; b.classList.toggle('on', on); b.setAttribute('aria-selected', on); });
+  document.querySelectorAll('#panel .tabpane').forEach((d) => (d.hidden = d.dataset.pane !== t));
+}
+document.querySelectorAll('#tabs button').forEach((b) => (b.onclick = () => setTab(b.dataset.tab)));
+
+// ------------------------------------------------------------------ library of ready-made groups
+// Whole sub-assemblies dropped next to what is already there, ready to be moved, joined, mirrored.
+const PREFABS = [
+  { name: 'Servo con leva', sub: 'Base, un MG996R e una trave sul suo albero', make: () => tourDoc(4) },
+  { name: 'Braccio a due servo', sub: 'Torretta che gira e braccio che si alza', make: armDemo },
+  { name: 'Dito con elastici', sub: 'Tre falangi sul muro: un verricello chiude, gli elastici riaprono', make: fingerDemo },
+  { name: 'Dito a cinghia', sub: 'Tre falangi accoppiate, un filo chiude e uno riapre', make: fingerBeltDemo },
+];
+function insertPrefab(pf) {
+  if (S.mode === 'run') stopSim();
+  const sub = migrate(JSON.parse(JSON.stringify(pf.make())));
+  const cur = docBounds(S.doc), sb = docBounds(sub);
+  // to the right of the model if there is room on the wall and the baseplate, else to the left
+  let dx = 0, fits = true;
+  if (cur && sb) {
+    const right = Math.ceil((cur.max[0] - sb.min[0] + P) / P) * P, left = Math.floor((cur.min[0] - sb.max[0] - P) / P) * P;
+    const ok = (d) => sb.min[0] + d >= BOARD.x0 - P && sb.max[0] + d <= BOARD.x1 + P;
+    fits = ok(right) || ok(left);
+    dx = ok(right) ? right : ok(left) ? left : 0;
+  }
+  pushUndo();
+  const map = new Map(), made = [], xf = xfShift([dx, 0, 0]);
+  for (const k of ['parts', 'pins', 'pulleys', 'winches']) for (const o of sub[k]) {
+    const id = S.doc.nextId++;
+    map.set(o.id, id); o.id = id;
+    shiftItem(o, [dx, 0, 0]);
+    S.doc[k].push(o);
+    if (k !== 'pins') made.push(id);
+  }
+  for (const st of sub.strings) {
+    st.id = S.doc.nextId++;
+    delete st.fmaxRef;
+    st.anchors = st.anchors.map((a) => { const b = xf.anchor({ ...a }); if (b.part !== undefined) b.part = map.get(b.part); if (b.id !== undefined) b.id = map.get(b.id); return b; });
+    S.doc.strings.push(st);
+  }
+  commit();
+  setTool('select');
+  selectMany(made);
+  setTab('lib');
+  view.isoView();
+  toast(!fits ? `${pf.name} inserito sopra al modello, di fianco non c'era posto: trascinalo via.` : `${pf.name} inserito e selezionato: trascinalo dove serve.`);
+}
+function renderLib() {
+  const el = $('lib');
+  if (el.childElementCount) { el.querySelectorAll('button').forEach((b) => (b.disabled = false)); return; }
+  for (const pf of PREFABS) {
+    const d = document.createElement('div');
+    d.className = 'libitem';
+    d.innerHTML = '<div><b></b><span></span></div><button>Inserisci</button>';
+    d.querySelector('b').textContent = pf.name;
+    d.querySelector('span').textContent = pf.sub;
+    d.querySelector('button').onclick = () => insertPrefab(pf);
+    el.appendChild(d);
+  }
 }
 
 // ------------------------------------------------------------------ object tree
@@ -1771,15 +1877,17 @@ const TOUR = [
     enter: () => setTool('beam'), done: () => servoParts().some((sv) => shaftMembers(S.doc, sv).length > 0), auto: () => tourSet(4) },
   { t: '5. Simula',
     h: 'Premi <b>Simula</b> (o <kbd>Spazio</kbd>) e muovi lo <b>slider del servo</b> a destra. Puoi anche afferrare i pezzi col mouse. Nel pannello leggi la coppia che il servo sta facendo.',
+    enter: () => setTab('controls'),
     done: () => S.mode === 'run' && Object.values(S.controls.servo).some((v) => Math.abs(v) > 5),
     auto: () => { if (!servoParts().length) tourSet(4); if (S.mode !== 'run') startSim(); const sv = servoParts()[0]; if (sv && S.mode === 'run') { S.controls.servo[sv.id] = 60; S.sim.setControls(S.controls); renderControls(); } } },
   { t: '6. Copia tutto in un colpo',
-    h: 'Premi <b>■</b> per tornare a costruire. Poi <kbd>Ctrl</kbd>+<kbd>A</kbd> seleziona tutto e nel pannello a destra premi <b>Specchia</b>: ottieni il braccio gemello. <b>Ripeti</b> ne fa una fila, <b>Shift+clic</b> sceglie solo alcuni pezzi.',
+    h: 'Premi <b>■</b> per tornare a costruire. Poi <kbd>Ctrl</kbd>+<kbd>A</kbd> seleziona tutto e nella scheda <b>Pezzo</b> a destra premi <b>Specchia</b>: ottieni il braccio gemello. <b>Ripeti</b> ne fa una fila, <b>Shift+clic</b> sceglie solo alcuni pezzi.',
     enter: () => { S.tourRef = servoParts().length; },
     done: () => S.mode === 'edit' && servoParts().length > S.tourRef,
     auto: () => { stopSim(); if (!servoParts().length) tourSet(4); setTool('select'); selectMany(S.doc.parts.map((p) => p.id)); mirrorSelection(); } },
   { t: '7. Falli muovere da soli',
-    h: 'Nel riquadro <b>Sequenza di pose</b>: metti gli slider in una posizione e premi <b>Salva posa</b>, cambiali e salvane un\'altra. Con due pose compare <b>Riproduci in sequenza</b> e il robot le ripete.',
+    enter: () => setTab('controls'),
+    h: 'Nella scheda <b>Comandi</b>, riquadro <b>Sequenza di pose</b>: metti gli slider in una posizione e premi <b>Salva posa</b>, cambiali e salvane un\'altra. Con due pose compare <b>Riproduci in sequenza</b> e il robot le ripete.',
     done: () => (S.doc.poses || []).length >= 2,
     auto: () => {
       const ids = servoParts().map((p) => p.id);
@@ -1794,9 +1902,9 @@ const TOUR = [
       <li><b>Perno</b> <kbd>P</kbd>: unisce due pezzi su un foro. Un altro clic lo blocca o lo motorizza.</li>
       <li><b>Puleggia</b> <kbd>U</kbd>, <b>Verricello</b> <kbd>W</kbd> e <b>Filo</b> <kbd>F</kbd>: per dita e tendini. Guarda <i>Esempi, Dito con elastici</i>.</li>
       <li>Un <b>filo</b> selezionato mostra il percorso a <b>numeri</b>: trascinali per spostare un punto, trascina un <b>+</b> per aggiungerne uno, clic destro lo toglie.</li>
-      <li><b>Albero</b> nel pannello: cosa è attaccato a cosa. Un clic seleziona il pezzo.</li>
+      <li>Schede a destra: <b>Albero</b> mostra cosa è attaccato a cosa, <b>Libreria</b> inserisce gruppi già pronti, <b>Distinta</b> conta i pezzi.</li>
       <li><b>Metro</b> <kbd>T</kbd> misura, <b>Baricentro</b> mostra dove pesa, <kbd>H</kbd> nasconde un pezzo.</li>
-      <li><b>Distinta pezzi</b> in fondo al pannello, <b>STL</b> e JSON nel menu File.</li>
+      <li><b>STL</b> e JSON nel menu File. Su un blocco puoi scrivere un <b>peso di prova</b>, e i servo mostrano il <b>picco di coppia</b>.</li>
       <li><kbd>Ctrl</kbd>+<kbd>Z</kbd> annulla sempre. I progetti si salvano da soli.</li>
     </ul>Puoi riaprire questo tutorial quando vuoi dal pulsante <b>Tutorial</b> in alto.` },
 ];
@@ -1945,7 +2053,7 @@ $('panel').addEventListener('wheel', (e) => {
 }, { passive: false });
 
 // ------------------------------------------------------------------ side panel
-function renderPanel() { renderControls(); renderSeq(); renderLegend(); renderInspector(); renderTree(); renderWarnings(); renderModel(); }
+function renderPanel() { renderLib(); renderControls(); renderSeq(); renderLegend(); renderInspector(); renderTree(); renderWarnings(); renderModel(); }
 
 function stringName(s) {
   if (s.name) return s.name;
@@ -2048,7 +2156,8 @@ function renderControls() {
       box.innerHTML = `<div class="row"><label class="name" for="${id}">Servo ${++ns}${o.model ? ' · ' + o.model : ''}</label><span class="val" data-v>${fmt(v, 0)}°</span></div>
         <input type="range" id="${id}" min="${lo}" max="${hi}" step="1" value="${v}">
         <div class="row"><span class="val" data-t>coppia —</span><span class="val">max ${fmt(kgcm(sv.tmax), 1)} kg·cm</span></div>
-        <div class="meter" data-m><i></i></div><div class="note" data-n hidden></div>`;
+        <div class="meter" data-m><i></i></div>
+        <div class="row"><span class="val muted">picco in questa prova</span><span class="val" data-p>—</span></div><div class="note" data-n hidden></div>`;
       const r = box.querySelector('input');
       r.oninput = () => { liveStart(); S.controls.servo[o.id] = +r.value; box.querySelector('[data-v]').textContent = `${fmt(+r.value, 0)}°`; S.sim?.setControls(S.controls); markDirty(); };
       box.onmouseenter = () => { if (S.selected !== o.id) view.setHighlight(o.id, true, 0x888888); };
@@ -2090,6 +2199,9 @@ function updateLiveReadouts() {
       const pid = +box.dataset.pin;
       const val = Math.abs(sim.servoTorque(pid)), max = +box.dataset.tmax || 0.2;
       box.querySelector('[data-t]').textContent = `coppia ${fmt(kgcm(val), 2)} kg·cm`;
+      const pk = (S.peak[pid] = Math.max(S.peak[pid] || 0, val));
+      const pe = box.querySelector('[data-p]');
+      if (pe) { pe.textContent = `${fmt(Math.min(100, (pk / max) * 100), 0)}% del massimo`; pe.classList.toggle('hot', pk >= max * 0.98); }
       const m = box.querySelector('[data-m]');
       m.querySelector('i').style.width = Math.min(100, (val / max) * 100) + '%';
       m.classList.toggle('hot', val >= max * 0.98);
@@ -2195,6 +2307,8 @@ function renderInspector() {
     const dims = ['Larghezza', 'Profondità', 'Altezza'];
     dims.forEach((lbl, k) => numProp(lbl, o.s[k], 1, 40, 1, (v) => { const old = o.s[k]; o.s[k] = v; if (blocked(o, o.id)) { o.s[k] = old; toast('Non c\'è spazio per allungarlo.'); } }, 'fori'));
     swatches(BLOCK_COLORS);
+    numProp('Peso di prova', o.mass ?? 0, 0, 5000, 10, (v) => { if (v > 0) o.mass = v; else delete o.mass; }, 'g');
+    add('<p class="empty">0 = il peso vero della plastica. Scrivi i grammi per simulare un carico, per esempio l\'oggetto che il braccio deve alzare.</p>');
     const gl = add(`<label class="prop"><span>Si incolla a ciò che tocca</span><input type="checkbox" ${o.glue !== false ? 'checked' : ''} ${editable ? '' : 'disabled'}></label>`);
     gl.querySelector('input').onchange = (e) => { pushUndo(); if (e.target.checked) delete o.glue; else o.glue = false; commit(); };
     add('<p class="empty">Ha un foro su ogni faccia: ci passano perni e alberi dei servo, e i fili ci si legano. Togli la colla se deve muoversi accanto ad altri blocchi.</p>');

@@ -233,7 +233,7 @@ export function buildMJCF(doc, opts = {}) {
   const partGeom = (part) => {
     if (isBlock(part)) {
       const h = part.s.map((n) => (n * P) / 2 - 0.05), c = part.s.map((n) => ((n - 1) * P) / 2);
-      return `<geom name="geom${part.id}" type="box" size="${fm(h)}" pos="${fm(c)}" density="${DEFAULTS.blockDensity}" contype="1" conaffinity="65535"/>`;
+      return `<geom name="geom${part.id}" type="box" size="${fm(h)}" pos="${fm(c)}" ${part.mass > 0 ? `mass="${f(part.mass / 1000)}"` : `density="${DEFAULTS.blockDensity}"`} contype="1" conaffinity="65535"/>`;
     }
     if (isServo(part)) {
       const b = servoLocalBox(part), sp = servoSpec(part) || SERVO_MODELS.SG90;
