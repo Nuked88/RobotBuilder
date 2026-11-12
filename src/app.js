@@ -63,7 +63,7 @@ let store = null;
 
 // ------------------------------------------------------------------ hint strip
 const HINTS = {
-  select: '<b>Clicca</b> un pezzo, <b>Shift+clic</b> ne aggiunge, <b>Shift+trascina</b> nel vuoto fa un riquadro, <b>doppio clic</b> prende il gruppo. <b>Frecce</b> spostano, <b>anelli</b> ruotano, <b>piastrine</b> allungano: mentre tiri puoi scrivere il numero. <b>R</b> ruota, <b>H</b> nasconde, <b>Ctrl+C/V</b> copia.',
+  select: '<b>Clicca</b> un pezzo, <b>Shift+clic</b> ne aggiunge, <b>Shift+trascina</b> nel vuoto fa un riquadro, <b>doppio clic</b> prende il gruppo. <b>Frecce</b> spostano, <b>anelli</b> ruotano (o <b>Shift+tasto destro</b> trascinato accanto a una freccia), <b>piastrine</b> allungano: mentre tiri puoi scrivere il numero. <b>R</b> ruota, <b>H</b> nasconde, <b>Ctrl+C/V</b> copia.',
   measure: 'Clicca due punti per misurare la distanza: si aggancia ai fori. <b>Esc</b> toglie la misura.',
   block: '<b>Clicca una faccia</b> (pavimento, muro o un altro pezzo) per appoggiarci un blocco. <b>Trascina</b> per farne uno lungo o una piastra. <b>Clic destro</b> lo toglie. I blocchi che si toccano restano incollati.',
   block1: 'Rilascia per posare il blocco, oppure <b>scrivi la lunghezza in fori</b> e premi <b>Invio</b>. <b>Esc</b> annulla.',
@@ -1019,6 +1019,14 @@ const canvas = view.renderer.domElement;
 let down = null;
 canvas.addEventListener('pointerdown', (e) => {
   down = { x: e.offsetX, y: e.offsetY, b: e.button, t: performance.now() };
+  if (e.button === 2 && e.shiftKey && S.mode === 'edit' && S.tool === 'select' && gizAxes.length) {
+    // Shift + right drag: turn the selection about the arrow nearest to the mouse
+    e.preventDefault();
+    view.controls.enabled = false;
+    startRotate({ axis: nearestAxis(e.offsetX, e.offsetY) }, e.offsetX, e.offsetY, true);
+    if (S.rot) { canvas.setPointerCapture(e.pointerId); updateRotate(e.offsetX, e.offsetY); } else view.controls.enabled = true;
+    return;
+  }
   if (e.button !== 0) return;
   view.controls.mouseButtons.LEFT = null;
   if (S.mode === 'edit' && S.tool === 'block') {
@@ -1193,6 +1201,7 @@ canvas.addEventListener('pointermove', (e) => {
     return;
   }
   if (down && (e.buttons & 6)) return; // orbiting / panning
+  hoverGizmo(e.offsetX, e.offsetY);
   updateGhost(e.offsetX, e.offsetY);
 });
 
@@ -1485,9 +1494,26 @@ const ringGizMat = AX_COL.map((c) => new THREE.MeshBasicMaterial({ color: c, dep
 const grabMat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthTest: false, depthWrite: false });
 const padMat = new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false, transparent: true, opacity: 0.92 });
 const yUp = new THREE.Vector3(0, 1, 0);
+let gizAxes = [];
+function nearestAxis(sx, sy) {
+  let best = 0, bd = Infinity;
+  for (const g of gizAxes) {
+    const a = view.project(g.a), b = view.project(g.b);
+    const vx = b.x - a.x, vy = b.y - a.y, t = clamp(((sx - a.x) * vx + (sy - a.y) * vy) / (vx * vx + vy * vy || 1), 0, 1);
+    const d = Math.hypot(sx - a.x - vx * t, sy - a.y - vy * t);
+    if (d < bd) { bd = d; best = g.axis; }
+  }
+  return best;
+}
+function hoverGizmo(sx, sy) {
+  const g = S.mode === 'edit' && S.tool === 'select' && !S.rot ? pickGizmo(sx, sy) : null;
+  ringGizMat.forEach((m, a) => { m.opacity = g && g.type === 'rot' && g.axis === a ? 1 : 0.6; });
+  canvas.style.cursor = g ? (g.type === 'rot' ? 'grab' : 'pointer') : '';
+}
 function updateGizmo() {
   updateNodes();
   gizmo.clear();
+  gizAxes = [];
   if (S.mode !== 'edit' || S.tool !== 'select') return;
   const ids = new Set(selIds());
   const sel = { parts: S.doc.parts.filter((p) => ids.has(p.id)), pulleys: S.doc.pulleys.filter((p) => ids.has(p.id)), winches: S.doc.winches.filter((p) => ids.has(p.id)) };
@@ -1509,13 +1535,14 @@ function updateGizmo() {
     g.position.copy(c).addScaledVector(dir, half[a] + 3.5 * k);
     g.traverse((m) => { m.renderOrder = 20; m.userData.giz = { type: 'move', dir }; });
     gizmo.add(g);
+    gizAxes.push({ axis: a, a: g.position.clone(), b: g.position.clone().addScaledVector(dir, 17 * k) });
   }
   // rotation rings: one per axis, a quarter turn at a time (15° for flat pieces in their own plane)
   const rr = Math.max(...half) + 9 * k;
   for (let a = 0; a < 3; a++) {
     const turn = (g) => { if (a === 0) g.rotateY(Math.PI / 2); else if (a === 1) g.rotateX(Math.PI / 2); return g; };
-    const vis = new THREE.Mesh(turn(new THREE.TorusGeometry(rr, 0.45 * k, 6, 72)), ringGizMat[a]);
-    const grab = new THREE.Mesh(turn(new THREE.TorusGeometry(rr, 2.4 * k, 6, 48)), grabMat);
+    const vis = new THREE.Mesh(turn(new THREE.TorusGeometry(rr, 0.75 * k, 8, 72)), ringGizMat[a]);
+    const grab = new THREE.Mesh(turn(new THREE.TorusGeometry(rr, 4.5 * k, 6, 48)), grabMat);
     vis.raycast = () => {};
     for (const m of [vis, grab]) { m.position.copy(c); m.renderOrder = 19; m.userData.giz = { type: 'rot', axis: a }; gizmo.add(m); }
   }
@@ -1592,18 +1619,21 @@ function fitsWorld() {
   }
   return true;
 }
-function startRotate(g, sx, sy) {
+function startRotate(g, sx, sy, byDrag = false) {
   const items = moveItems(selIds());
   if (!items.length) return;
   const flat = items.every((o) => !o.c && !isServo(o) && Math.abs(NVEC[fam(o)][g.axis]) > 0.5);
   const r = { axis: g.axis, pivot: rotPivot(items), ids: items.map((o) => o.id), snap: snapshot(), deg: 0, undone: false, step: flat ? 15 : 90, bad: false };
   r.a0 = ringAngle(sx, sy, r) ?? 0;
+  if (byDrag) r.x0 = sx;
   S.rot = r;
+  ringGizMat.forEach((m, a) => { m.opacity = a === r.axis ? 1 : 0.25; });
 }
 function updateRotate(sx, sy) {
   const r = S.rot;
   let deg;
   if (/\d/.test(S.typed.v)) deg = +S.typed.v;
+  else if (r.x0 !== undefined) deg = ((sx - r.x0) / (r.step === 15 ? 20 : 70)) * r.step; // sideways drag: so many pixels a step
   else { const a = ringAngle(sx, sy, r); if (a === null) return; deg = a - r.a0; }
   deg = Math.round(deg / r.step) * r.step;
   deg = ((deg + 180) % 360 + 360) % 360 - 180;
@@ -1627,6 +1657,8 @@ function updateRotate(sx, sy) {
 function endRotate() {
   const r = S.rot;
   S.rot = null;
+  view.controls.enabled = true;
+  ringGizMat.forEach((m) => { m.opacity = 0.6; });
   typedReset();
   ghostLabels = [];
   if (!r.undone) return;
