@@ -271,3 +271,5 @@ section[hidden] + .whenempty { display: block; }
 .libitem span { display: block; color: var(--muted); font-size: 12px; line-height: 1.35; }
 .libitem button { padding: 6px 10px; font-size: 12.5px; }
 .ctl .val.hot { color: var(--warn); font-weight: 600; }
+
+.selbox { position: absolute; z-index: 11; pointer-events: none; border: 1.5px dashed var(--focus); background: color-mix(in srgb, var(--focus) 12%, transparent); border-radius: 2px; }

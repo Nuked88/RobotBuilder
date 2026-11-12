@@ -2,7 +2,7 @@
 // bill of materials, interference check. Pure functions on the document.
 import {
   P, isBeam, isBlock, isServo, fam, pinMembers, mountOf, shiftItem, docBounds, solidBox, boxesOverlap, holeWorld, partLabel,
-  PIN_LABEL, SERVO_MODELS, FLOOR, glueLinks, shaftMembers,
+  PIN_LABEL, SERVO_MODELS, FLOOR, glueLinks, shaftMembers, toWorld, toFam, famDir, NVEC, guideWorld, localToWorld, worldToLocal, wheelWorld, rad,
 } from './model.js';
 
 const COLLS = ['parts', 'pins', 'pulleys', 'winches', 'strings'];
@@ -185,7 +185,7 @@ export function sceneTree(doc) {
   const grow = (id, via) => {
     seen.add(id);
     const p = byId.get(id);
-    const node = { id, kind: 'part', label: partLabel(p), color: isServo(p) ? '#31343a' : p.color, via, children: [] };
+    const node = { id, kind: 'part', label: p.name || partLabel(p), color: isServo(p) ? '#31343a' : p.color, via, children: [] };
     // breadth first, so every piece hangs from the one closest to the base
     const next = (adj.get(id) || []).filter((e) => e.to !== 'G' && !seen.has(e.to));
     for (const e of next) seen.add(e.to);
@@ -207,4 +207,73 @@ export function sceneTree(doc) {
     return { id: s.id, via: bits.join(' · ') || `${s.anchors.length} punti` };
   });
   return { fixed, loose, strings };
+}
+
+// ---------------------------------------------------------------- rotation
+// Turn pieces about a world axis (k = 0 x, 1 y, 2 z) through `pivot` [x, y, z] by `deg` degrees.
+// Everything lives on three plane families, so quarter turns always work; any other angle works
+// only for flat pieces turning in their own plane. Returns false (document untouched in meaning,
+// but possibly half changed: the caller restores it) when the result cannot be represented.
+export function rotateItems(doc, items, k, deg, pivot) {
+  const a = rad(deg), c = Math.round(Math.cos(a) * 1e9) / 1e9, s = Math.round(Math.sin(a) * 1e9) / 1e9;
+  const i = (k + 1) % 3, j = (k + 2) % 3;
+  const rv = (v) => { const o = [...v]; o[i] = v[i] * c - v[j] * s; o[j] = v[i] * s + v[j] * c; return o; };
+  const rp = (p) => { const v = rv([p.x - pivot[0], p.y - pivot[1], p.z - pivot[2]]); return { x: v[0] + pivot[0], y: v[1] + pivot[1], z: v[2] + pivot[2] }; };
+  const famOf = (N) => { for (const n of ['y', 'z', 'x']) { const d = N[0] * NVEC[n][0] + N[1] * NVEC[n][1] + N[2] * NVEC[n][2]; if (Math.abs(d) > 0.999) return { n, sign: Math.sign(d) }; } return null; };
+  const r6 = (v) => Math.round(v * 1e6) / 1e6;
+  const tag = (o, n) => { if (n === 'y') delete o.n; else o.n = n; };
+  const set = new Set(items);
+  const partIds = new Set(doc.parts.filter((p) => set.has(p)).map((p) => p.id));
+  const wheelIds = new Set([...doc.pulleys, ...doc.winches].filter((w) => set.has(w)).map((w) => w.id));
+  const byId = new Map(doc.parts.map((p) => [p.id, p]));
+  // where the string points on these pieces are now, to find them again afterwards
+  const marks = [];
+  for (const st of doc.strings) for (const an of st.anchors) {
+    if (an.t === 'guide' && partIds.has(an.part)) marks.push({ an, w: rp(guideWorld(byId.get(an.part), an.i, an.side)) });
+    else if (an.t === 'pt' && partIds.has(an.part)) marks.push({ an, w: rp(localToWorld(byId.get(an.part), an.p)) });
+    else if (an.t === 'pulley' && wheelIds.has(an.id)) { const w = doc.pulleys.find((e) => e.id === an.id); marks.push({ an, d: rv(famDir(fam(w), an.sx, an.sz)) }); }
+  }
+  for (const o of items) {
+    if (o.c) { // block
+      if (deg % 90) return false;
+      const p0 = rp({ x: o.c[0], y: o.c[1], z: o.c[2] }), p1 = rp({ x: o.c[0] + (o.s[0] - 1) * P, y: o.c[1] + (o.s[1] - 1) * P, z: o.c[2] + (o.s[2] - 1) * P });
+      const A = [p0.x, p0.y, p0.z], B = [p1.x, p1.y, p1.z];
+      o.c = A.map((v, q) => Math.round(Math.min(v, B[q])));
+      o.s = A.map((v, q) => Math.round(Math.abs(v - B[q]) / P) + 1);
+      continue;
+    }
+    const n = fam(o), f = famOf(rv(NVEC[n]));
+    if (!f) return false;
+    if (o.lo !== undefined) { // pin
+      const q0 = toFam(f.n, rp(toWorld(n, o.x, o.z, o.lo))), q1 = toFam(f.n, rp(toWorld(n, o.x, o.z, o.hi)));
+      o.x = r6(q0.x); o.z = r6(q0.z);
+      o.lo = Math.round(Math.min(q0.layer, q1.layer)); o.hi = Math.round(Math.max(q0.layer, q1.layer));
+      tag(o, f.n);
+      continue;
+    }
+    const q = toFam(f.n, rp(toWorld(n, o.x, o.z, o.layer)));
+    if (o.angle !== undefined) { // beam or servo: the direction it points in its plane
+      const d = rv(famDir(n, Math.cos(rad(o.angle)), Math.sin(rad(o.angle))));
+      const fd = toFam(f.n, { x: d[0], y: d[1], z: d[2] });
+      let ang = Math.round((Math.atan2(fd.z, fd.x) * 180) / Math.PI * 1e4) / 1e4;
+      if (isServo(o)) { if (Math.abs(ang / 90 - Math.round(ang / 90)) > 1e-3) return false; ang = ((Math.round(ang / 90) * 90) % 360 + 360) % 360; }
+      else if (ang <= -180) ang += 360;
+      o.angle = ang;
+    }
+    if (!isBeam(o)) { // servo and wheels have a side they stick out from
+      const dir = (o.dir || 1) * f.sign;
+      if (dir === 1) delete o.dir; else o.dir = -1;
+    }
+    o.x = r6(q.x); o.z = r6(q.z); o.layer = Math.round(q.layer);
+    tag(o, f.n);
+  }
+  for (const m of marks) {
+    const an = m.an;
+    if (an.t === 'guide') {
+      const part = byId.get(an.part), dist = (sd) => { const g = guideWorld(part, an.i, sd); return Math.hypot(g.x - m.w.x, g.y - m.w.y, g.z - m.w.z); };
+      an.side = dist(1) <= dist(-1) ? 1 : -1;
+    } else if (an.t === 'pt') an.p = worldToLocal(byId.get(an.part), m.w).map((v) => +v.toFixed(3));
+    else { const w = doc.pulleys.find((e) => e.id === an.id), fd = toFam(fam(w), { x: m.d[0], y: m.d[1], z: m.d[2] }); an.sx = r6(fd.x); an.sz = r6(fd.z); }
+  }
+  return true;
 }

@@ -6,7 +6,7 @@ import { fingerDemo, fingerBeltDemo, armDemo } from './demo.js';
 import { openStore, lastProjectId, setLastProjectId, saveFile } from './storage.js';
 import { servoParams } from './mjcf.js';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
-import { withDependents, boundsOf, cloneItems, xfShift, xfMirrorX, sceneTree, bom, bomCsv, interferences } from './ops.js';
+import { withDependents, boundsOf, cloneItems, xfShift, xfMirrorX, sceneTree, rotateItems, bom, bomCsv, interferences } from './ops.js';
 import {
   P, BEAM_W, LAYER, rad, emptyDoc, holePos, holeAt, holeIndexAt, layerBehind, pinAt, pinMembers, findById, prune, BEAM_COLORS, BLOCK_COLORS, PIN_LABEL,
   STRING_LABEL, BOARD, FLOOR, EPS, guidePos, anchorPos, mountOf, fam, NVEC, toWorld, toFam, famQuat, isBeam, isBlock, isServo, holeWorld,
@@ -31,7 +31,7 @@ const S = {
   servoModel: 'SG90',
   servoAngle: 0,
   pulleyR: 6,
-  tab: 'controls', peak: {},
+  tab: 'controls', peak: {}, rot: null, box: null, clip: [],
   tour: null,          // guided tutorial: {i, doneAt, was}
   nodeSel: null, nodeHot: null, nodeDrag: null, // string path editing
   typed: { v: '', a: '', f: 0 }, // dimension being typed: value, angle, active field
@@ -63,7 +63,7 @@ let store = null;
 
 // ------------------------------------------------------------------ hint strip
 const HINTS = {
-  select: '<b>Clicca</b> un pezzo, <b>Shift+clic</b> ne aggiunge altri, <b>doppio clic</b> prende il gruppo. Tira le <b>frecce</b> per spostare o le <b>piastrine</b> per allungare, e <b>scrivi i fori</b> se vuoi un numero preciso. <b>Tab</b> va ai campi, <b>R</b> ruota, <b>H</b> nasconde.',
+  select: '<b>Clicca</b> un pezzo, <b>Shift+clic</b> ne aggiunge, <b>Shift+trascina</b> nel vuoto fa un riquadro, <b>doppio clic</b> prende il gruppo. <b>Frecce</b> spostano, <b>anelli</b> ruotano, <b>piastrine</b> allungano: mentre tiri puoi scrivere il numero. <b>R</b> ruota, <b>H</b> nasconde, <b>Ctrl+C/V</b> copia.',
   measure: 'Clicca due punti per misurare la distanza: si aggancia ai fori. <b>Esc</b> toglie la misura.',
   block: '<b>Clicca una faccia</b> (pavimento, muro o un altro pezzo) per appoggiarci un blocco. <b>Trascina</b> per farne uno lungo o una piastra. <b>Clic destro</b> lo toglie. I blocchi che si toccano restano incollati.',
   block1: 'Rilascia per posare il blocco, oppure <b>scrivi la lunghezza in fori</b> e premi <b>Invio</b>. <b>Esc</b> annulla.',
@@ -1030,7 +1030,7 @@ canvas.addEventListener('pointerdown', (e) => {
   const nd = S.mode === 'edit' && S.tool === 'select' ? pickNode(e.offsetX, e.offsetY) : null;
   if (nd) { S.nodeDrag = { sid: S.selected, i: nd.i, plus: nd.plus, x: e.offsetX, y: e.offsetY, moved: false, cand: null }; canvas.setPointerCapture(e.pointerId); return; }
   const giz = S.mode === 'edit' && S.tool === 'select' ? pickGizmo(e.offsetX, e.offsetY) : null;
-  if (giz) { startGizmo(giz); canvas.setPointerCapture(e.pointerId); return; }
+  if (giz) { startGizmo(giz, e.offsetX, e.offsetY); canvas.setPointerCapture(e.pointerId); return; }
   const hit = S.tool === 'select' ? view.pickObject(e.offsetX, e.offsetY) : null;
   if (S.mode === 'run' && hit && hit.kind === 'part' && hit.point) {
     const pose = S.sim.bodyPose(hit.id);
@@ -1046,6 +1046,12 @@ canvas.addEventListener('pointerdown', (e) => {
   if (S.mode === 'edit' && hit && hit.kind === 'part' && hit.point) {
     startMove(hit.id, e.shiftKey, e.offsetX, e.offsetY);
     if (S.move) canvas.setPointerCapture(e.pointerId);
+    return;
+  }
+  if (S.mode === 'edit' && S.tool === 'select' && !hit && e.shiftKey) {
+    // Shift + drag on empty space: a selection rectangle
+    S.box = { x0: e.offsetX, y0: e.offsetY, x1: e.offsetX, y1: e.offsetY };
+    canvas.setPointerCapture(e.pointerId);
     return;
   }
   // left drag on empty space orbits when nothing else wants it
@@ -1132,8 +1138,25 @@ function nudgeSelected(d) {
 }
 // R: turn the selected piece. A beam turns 15 degrees about its first hole (pins and wheels used
 // only by it turn too), a servo a quarter turn about its shaft, a block swaps two of its sides.
+// Lay a beam or a wheel on another plane, keeping the point it sits at.
+const AXIS_LABEL = { y: 'verso di te', z: 'in alto', x: 'di lato' };
+function replane(o, n2) {
+  const w = toWorld(fam(o), o.x, o.z, o.layer), f = toFam(n2, w);
+  o.x = Math.round(f.x * 1e6) / 1e6; o.z = Math.round(f.z * 1e6) / 1e6; o.layer = Math.round(f.layer);
+  if (n2 === 'y') delete o.n; else o.n = n2;
+}
+function flipWheel(o) { if ((o.dir || 1) === 1) o.dir = -1; else delete o.dir; }
 function rotateSelected(deg) {
   const doc = S.doc;
+  const wheel = [...doc.pulleys, ...doc.winches].find((w) => w.id === S.selected);
+  if (wheel) {
+    // a wheel is round: turning it means pointing its axis somewhere else
+    pushUndo();
+    if (deg > 0) replane(wheel, { y: 'z', z: 'x', x: 'y' }[fam(wheel)]); else flipWheel(wheel);
+    commit();
+    toast(deg > 0 ? `Ora l'asse punta ${AXIS_LABEL[fam(wheel)]}.` : 'Capovolto: ora si monta dal lato opposto.');
+    return;
+  }
   const part = doc.parts.find((p) => p.id === S.selected);
   if (!part) return;
   pushUndo();
@@ -1159,6 +1182,8 @@ function rotateSelected(deg) {
 
 canvas.addEventListener('pointermove', (e) => {
   if (S.nodeDrag) { updateNodeDrag(e.offsetX, e.offsetY); return; }
+  if (S.box) { updateBox(e.offsetX, e.offsetY); return; }
+  if (S.rot) { updateRotate(e.offsetX, e.offsetY); return; }
   if (S.resize) { updateResize(e.offsetX, e.offsetY); return; }
   if (S.move) { updateMove(e.offsetX, e.offsetY); return; }
   if (S.blockDraft) { dragBlock(e.offsetX, e.offsetY); return; }
@@ -1185,8 +1210,10 @@ function dragBlock(sx, sy) {
 }
 
 canvas.addEventListener('pointerup', (e) => {
-  if (!S.draw) typedReset();
+  if (!S.draw && !S.rot) typedReset();
   if (S.nodeDrag) { endNodeDrag(); down = null; return; }
+  if (S.box) { endBox(); down = null; return; }
+  if (S.rot) { endRotate(); canvas.releasePointerCapture(e.pointerId); down = null; return; }
   if (S.drag) { S.drag = null; S.sim?.clearForces(); canvas.releasePointerCapture(e.pointerId); return; }
   if (S.resize) { const r = S.resize; S.resize = null; ghostLabels = []; if (r.undone) commit(); canvas.releasePointerCapture(e.pointerId); down = null; return; }
   if (S.move) { endMove(); canvas.releasePointerCapture(e.pointerId); down = null; return; }
@@ -1245,14 +1272,14 @@ canvas.addEventListener('pointermove', (e) => { lastMouse = { x: e.offsetX, y: e
 // number of holes and press Enter, as in a CAD. For a beam, Tab switches to the angle.
 function numCtx() {
   if (S.mode !== 'edit') return null;
-  return S.resize ? 'resize' : S.move?.axis ? 'move' : S.blockDraft ? 'block' : S.draw ? 'beam' : null;
+  return S.rot ? 'rot' : S.resize ? 'resize' : S.move?.axis ? 'move' : S.blockDraft ? 'block' : S.draw ? 'beam' : null;
 }
 function showTyped() {
   const el = $('typed'), t = S.typed, ctx = numCtx();
   el.hidden = !ctx || (!t.v && !t.a && !t.f);
   if (el.hidden) return;
   const box = (v, on, unit) => `<span class="${on ? 'on' : ''}">${v || '…'}</span>${unit}`;
-  el.innerHTML = (ctx === 'beam' ? box(t.v, t.f === 0, ' fori') + ' ' + box(t.a, t.f === 1, '°') : box(t.v, true, ' fori')) + '<small>Invio</small>';
+  el.innerHTML = (ctx === 'beam' ? box(t.v, t.f === 0, ' fori') + ' ' + box(t.a, t.f === 1, '°') : box(t.v, true, ctx === 'rot' ? '°' : ' fori')) + '<small>Invio</small>';
   const m = lastMouse || { x: 200, y: 200 };
   el.style.left = `${m.x + 18}px`; el.style.top = `${m.y + 18}px`;
 }
@@ -1261,13 +1288,14 @@ function applyTyped() {
   showTyped();
   const m = lastMouse || (down && { x: down.x, y: down.y });
   if (!m) return;
-  if (S.resize) updateResize(m.x, m.y); else if (S.move) updateMove(m.x, m.y); else if (S.blockDraft) dragBlock(m.x, m.y); else updateGhost(m.x, m.y);
+  if (S.rot) updateRotate(m.x, m.y); else if (S.resize) updateResize(m.x, m.y); else if (S.move) updateMove(m.x, m.y); else if (S.blockDraft) dragBlock(m.x, m.y); else updateGhost(m.x, m.y);
 }
 function commitTyped() {
   const ctx = numCtx();
   if (ctx === 'beam') { if (lastMouse) updateGhost(lastMouse.x, lastMouse.y); clickBeam(); typedReset(); if (lastMouse) updateGhost(lastMouse.x, lastMouse.y); return; }
   typedReset();
-  if (ctx === 'resize') { const r = S.resize; S.resize = null; ghostLabels = []; if (r.undone) commit(); }
+  if (ctx === 'rot') endRotate();
+  else if (ctx === 'resize') { const r = S.resize; S.resize = null; ghostLabels = []; if (r.undone) commit(); }
   else if (ctx === 'move') endMove();
   else if (ctx === 'block') { placeBlock(); if (lastMouse) updateGhost(lastMouse.x, lastMouse.y); }
   down = null;
@@ -1278,7 +1306,7 @@ function typedKey(e, k) {
   if (!ctx) return false;
   const t = S.typed, f = ctx === 'beam' && t.f === 1 ? 'a' : 'v';
   if (/^[0-9]$/.test(k)) { if (t[f].length < 4) t[f] += k; applyTyped(); return true; }
-  if (k === '-' && !t[f] && (f === 'a' || ctx === 'move')) { t[f] = '-'; showTyped(); return true; }
+  if (k === '-' && !t[f] && (f === 'a' || ctx === 'move' || ctx === 'rot')) { t[f] = '-'; showTyped(); return true; }
   if (k === 'backspace' && (t.v || t.a)) { t[f] = t[f].slice(0, -1); applyTyped(); return true; }
   if (k === 'tab' && ctx === 'beam') { e.preventDefault(); t.f = 1 - t.f; showTyped(); return true; }
   if (k === 'enter') { commitTyped(); return true; }
@@ -1291,6 +1319,12 @@ window.addEventListener('keydown', (e) => {
   const k = e.key.toLowerCase();
   if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
   if ((e.ctrlKey || e.metaKey) && k === 'y') { e.preventDefault(); redo(); return; }
+  if ((e.ctrlKey || e.metaKey) && k === 'c' && S.mode === 'edit' && selIds().length) { S.clip = [...selIds()]; toast('Copiato: Ctrl+V lo incolla accanto.'); return; }
+  if ((e.ctrlKey || e.metaKey) && k === 'v' && S.mode === 'edit') {
+    const ids = (S.clip || []).filter((id) => findById(S.doc, id));
+    if (ids.length) { e.preventDefault(); setTool('select'); selectMany(ids); duplicateSelected(); }
+    return;
+  }
   if ((e.ctrlKey || e.metaKey) && k === 'd' && S.mode === 'edit') { e.preventDefault(); duplicateSelected(); return; }
   if ((e.ctrlKey || e.metaKey) && k === 'a' && S.mode === 'edit') { e.preventDefault(); setTool('select'); selectMany([...S.doc.parts, ...S.doc.pulleys, ...S.doc.winches].filter((o) => !S.hidden.has(o.id)).map((o) => o.id)); return; }
   if (e.ctrlKey || e.metaKey || e.altKey) return;
@@ -1376,6 +1410,8 @@ function moveItems(ids, group = false) {
     if (!f || f.coll === 'strings') continue;
     if (f.coll === 'parts') moveSet(id, group).forEach((o) => set.add(o)); else set.add(f.obj);
   }
+  // pins that only hold pieces of this selection travel with it
+  for (const pin of S.doc.pins) { const mem = pinMembers(S.doc, pin).filter((m) => m.kind === 'part'); if (mem.length && mem.every((m) => set.has(m.part))) set.add(pin); }
   return [...set];
 }
 function selectionSet() { return withDependents(S.doc, selIds()); }
@@ -1445,6 +1481,8 @@ view.scene.add(gizmo);
 const AX_COL = [0xe03131, 0x2f9e44, 0x1c7ed6];
 const AX_DIR = [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)];
 const gizMat = AX_COL.map((c) => new THREE.MeshBasicMaterial({ color: c, depthTest: false, transparent: true, opacity: 0.95 }));
+const ringGizMat = AX_COL.map((c) => new THREE.MeshBasicMaterial({ color: c, depthTest: false, transparent: true, opacity: 0.55 }));
+const grabMat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthTest: false, depthWrite: false });
 const padMat = new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false, transparent: true, opacity: 0.92 });
 const yUp = new THREE.Vector3(0, 1, 0);
 function updateGizmo() {
@@ -1472,6 +1510,15 @@ function updateGizmo() {
     g.traverse((m) => { m.renderOrder = 20; m.userData.giz = { type: 'move', dir }; });
     gizmo.add(g);
   }
+  // rotation rings: one per axis, a quarter turn at a time (15° for flat pieces in their own plane)
+  const rr = Math.max(...half) + 9 * k;
+  for (let a = 0; a < 3; a++) {
+    const turn = (g) => { if (a === 0) g.rotateY(Math.PI / 2); else if (a === 1) g.rotateX(Math.PI / 2); return g; };
+    const vis = new THREE.Mesh(turn(new THREE.TorusGeometry(rr, 0.45 * k, 6, 72)), ringGizMat[a]);
+    const grab = new THREE.Mesh(turn(new THREE.TorusGeometry(rr, 2.4 * k, 6, 48)), grabMat);
+    vis.raycast = () => {};
+    for (const m of [vis, grab]) { m.position.copy(c); m.renderOrder = 19; m.userData.giz = { type: 'rot', axis: a }; gizmo.add(m); }
+  }
   if (sel.parts.length === 1 && ids.size === 1 && isBlock(sel.parts[0])) {
     for (let a = 0; a < 3; a++) for (const side of [1, -1]) {
       const dims = [5 * k, 5 * k, 5 * k];
@@ -1489,7 +1536,8 @@ function updateGizmo() {
 }
 function pickGizmo(sx, sy) {
   if (!gizmo.children.length) return null;
-  const hit = view.ray(sx, sy).intersectObjects(gizmo.children, true)[0];
+  const hits = view.ray(sx, sy).intersectObjects(gizmo.children, true).filter((h) => h.object.userData.giz);
+  const hit = hits.find((h) => h.object.userData.giz.type !== 'rot') || hits[0];
   return hit ? { ...hit.object.userData.giz, point: hit.point } : null;
 }
 // How far along the line (p0, dir) the mouse is pointing.
@@ -1500,7 +1548,93 @@ function axisParam(sx, sy, p0, dir) {
   const den = 1 - b * b;
   return den < 1e-4 ? 0 : (b * e - d) / den;
 }
-function startGizmo(g) {
+// ---- selection rectangle
+function updateBox(sx, sy) {
+  const b = S.box, el = $('selbox');
+  b.x1 = sx; b.y1 = sy;
+  el.hidden = false;
+  el.style.left = `${Math.min(b.x0, b.x1)}px`; el.style.top = `${Math.min(b.y0, b.y1)}px`;
+  el.style.width = `${Math.abs(b.x1 - b.x0)}px`; el.style.height = `${Math.abs(b.y1 - b.y0)}px`;
+}
+function endBox() {
+  const b = S.box;
+  S.box = null;
+  $('selbox').hidden = true;
+  if (Math.abs(b.x1 - b.x0) < 5 && Math.abs(b.y1 - b.y0) < 5) return;
+  const inside = (w) => { const q = view.project(w); return q.x >= Math.min(b.x0, b.x1) && q.x <= Math.max(b.x0, b.x1) && q.y >= Math.min(b.y0, b.y1) && q.y <= Math.max(b.y0, b.y1); };
+  const ids = new Set(selIds().filter((id) => { const f = findById(S.doc, id); return f && f.coll !== 'strings' && f.coll !== 'pins'; }));
+  for (const p of S.doc.parts) {
+    if (S.hidden.has(p.id)) continue;
+    const bb = docBounds({ parts: [p], pulleys: [], winches: [] });
+    if (bb && inside({ x: (bb.min[0] + bb.max[0]) / 2, y: (bb.min[1] + bb.max[1]) / 2, z: (bb.min[2] + bb.max[2]) / 2 })) ids.add(p.id);
+  }
+  for (const w of [...S.doc.pulleys, ...S.doc.winches]) if (!S.hidden.has(w.id) && inside(wheelWorld(w))) ids.add(w.id);
+  selectMany([...ids]);
+}
+// ---- turning with the rings
+function rotPivot(items) {
+  const ids = selIds(), one = ids.length === 1 ? findById(S.doc, ids[0]) : null;
+  if (one && one.coll === 'parts' && !isBlock(one.obj)) { const w = toWorld(fam(one.obj), one.obj.x, one.obj.z, one.obj.layer); return [w.x, w.y, w.z]; }
+  if (one && (one.coll === 'pulleys' || one.coll === 'winches')) { const w = wheelWorld(one.obj); return [w.x, w.y, w.z]; }
+  const b = docBounds({ parts: items.filter((o) => S.doc.parts.includes(o)), pulleys: items.filter((o) => S.doc.pulleys.includes(o)), winches: items.filter((o) => S.doc.winches.includes(o)) });
+  return b ? [0, 1, 2].map((q) => snapP((b.min[q] + b.max[q]) / 2)) : [0, 0, 0];
+}
+function ringAngle(sx, sy, r) {
+  const ax = AX_DIR[r.axis], p = view.planeThrough(sx, sy, ax, new THREE.Vector3(...r.pivot));
+  if (!p) return null;
+  const v = [p.x - r.pivot[0], p.y - r.pivot[1], p.z - r.pivot[2]];
+  return (Math.atan2(v[(r.axis + 2) % 3], v[(r.axis + 1) % 3]) * 180) / Math.PI;
+}
+function fitsWorld() {
+  for (const p of S.doc.parts) {
+    if (isBeam(p)) { for (const i of [0, p.holes - 1]) { const h = holeWorld(p, i); if (h.z < FLOOR.z - 0.5 || h.y > 0.5) return false; } }
+    else { const b = solidBox(p); if (b.min[2] < FLOOR.z - 0.5 || b.max[1] > 0.5) return false; }
+  }
+  return true;
+}
+function startRotate(g, sx, sy) {
+  const items = moveItems(selIds());
+  if (!items.length) return;
+  const flat = items.every((o) => !o.c && !isServo(o) && Math.abs(NVEC[fam(o)][g.axis]) > 0.5);
+  const r = { axis: g.axis, pivot: rotPivot(items), ids: items.map((o) => o.id), snap: snapshot(), deg: 0, undone: false, step: flat ? 15 : 90, bad: false };
+  r.a0 = ringAngle(sx, sy, r) ?? 0;
+  S.rot = r;
+}
+function updateRotate(sx, sy) {
+  const r = S.rot;
+  let deg;
+  if (/\d/.test(S.typed.v)) deg = +S.typed.v;
+  else { const a = ringAngle(sx, sy, r); if (a === null) return; deg = a - r.a0; }
+  deg = Math.round(deg / r.step) * r.step;
+  deg = ((deg + 180) % 360 + 360) % 360 - 180;
+  if (deg === r.deg) return;
+  S.doc = JSON.parse(r.snap);
+  r.bad = false;
+  if (deg !== 0) {
+    const items = r.ids.map((id) => findById(S.doc, id)?.obj).filter(Boolean);
+    const ok = rotateItems(S.doc, items, r.axis, deg, r.pivot);
+    if (!ok || !fitsWorld()) { S.doc = JSON.parse(r.snap); r.bad = ok ? 'Così finirebbe dentro il muro o il pavimento' : 'Su questo asse gira solo a quarti di giro: raddrizzalo prima'; }
+    else if (!r.undone) { S.undo.push(r.snap); if (S.undo.length > 150) S.undo.shift(); S.redo = []; r.undone = true; }
+  }
+  r.deg = r.bad ? 0 : deg;
+  view.rebuild(S.doc);
+  applyHidden();
+  for (const id of selIds()) view.setHighlight(id, true, 0x3a6fd8);
+  updateGizmo();
+  ghostLabels = [{ text: r.bad ? r.bad : `${deg}°${r.step === 90 ? ' (a quarti di giro)' : ''}`, pos: [r.pivot[0], r.pivot[1], r.pivot[2] + 10], cls: r.bad ? 'warn' : 'ghost' }];
+  schedulePreview();
+}
+function endRotate() {
+  const r = S.rot;
+  S.rot = null;
+  typedReset();
+  ghostLabels = [];
+  if (!r.undone) return;
+  if (r.deg === 0) S.undo.pop();
+  commit();
+}
+function startGizmo(g, sx, sy) {
+  if (g.type === 'rot') { startRotate(g, sx, sy); return; }
   if (g.type === 'move') {
     const items = moveItems(selIds());
     S.move = { p0: g.point.clone(), axis: g.dir, items, orig: items.map(coordsOf), d: [0, 0, 0], undone: false, selectId: S.selected, keep: true };
@@ -2273,6 +2407,10 @@ function renderInspector() {
 
   // what a CAD calls pattern, mirror, hide: for one piece or for the whole selection
   const groupActions = () => {
+    if (!many && f.coll === 'parts') {
+      const nm = add(`<div class="prop"><label for="partName">Nome</label><input id="partName" value="${escapeHtml(o.name || '')}" placeholder="${escapeHtml(partLabel(o))}" style="width:150px;padding:5px 6px;border:1px solid var(--line);border-radius:6px;background:var(--raised)" ${editable ? '' : 'disabled'}></div>`);
+      nm.querySelector('input').onchange = (e) => { pushUndo(); const v = e.target.value.trim().slice(0, 40); if (v) o.name = v; else delete o.name; commit(); };
+    }
     add(`<h3 class="sub">${many ? 'Tutti insieme' : 'Copie'}</h3>`);
     const row = add(`<div class="pattern"><label>Ripeti <input type="number" id="patN" min="2" max="30" value="3" ${editable ? '' : 'disabled'}> volte</label>
       <label>ogni <input type="number" id="patStep" min="0" max="60" value="0" title="0 = una accanto all'altra" ${editable ? '' : 'disabled'}> fori</label></div>`);
@@ -2306,6 +2444,8 @@ function renderInspector() {
     info('Misura', `${o.s.map((n) => n * P).join(' × ')} mm`);
     const dims = ['Larghezza', 'Profondità', 'Altezza'];
     dims.forEach((lbl, k) => numProp(lbl, o.s[k], 1, 40, 1, (v) => { const old = o.s[k]; o.s[k] = v; if (blocked(o, o.id)) { o.s[k] = old; toast('Non c\'è spazio per allungarlo.'); } }, 'fori'));
+    const rbk = add(`<button ${editable ? '' : 'disabled'}>Ruota di 90° (R)</button>`);
+    rbk.onclick = () => rotateSelected(90);
     swatches(BLOCK_COLORS);
     numProp('Peso di prova', o.mass ?? 0, 0, 5000, 10, (v) => { if (v > 0) o.mass = v; else delete o.mass; }, 'g');
     add('<p class="empty">0 = il peso vero della plastica. Scrivi i grammi per simulare un carico, per esempio l\'oggetto che il braccio deve alzare.</p>');
@@ -2335,7 +2475,15 @@ function renderInspector() {
     numProp('Lunghezza (fori)', o.holes, 2, 25, 1, (v) => (o.holes = v));
     numProp('Angolo', +(+o.angle).toFixed(1), -180, 180, 15, (v) => (o.angle = v), '°');
     numProp('Strato', o.layer, -40, 40, 1, (v) => (o.layer = v));
-    info('Piano', FAM_LABEL[fam(o)]);
+    const rot = add('<div class="seg"></div>');
+    for (const [txt, d] of [['↺ Ruota 15°', 15], ['↻ Ruota 15°', -15], ['Ruota 90°', 90]]) {
+      const b = document.createElement('button');
+      b.textContent = txt; b.title = 'R ruota, Shift+R al contrario'; b.disabled = !editable;
+      b.onclick = () => rotateSelected(d);
+      rot.appendChild(b);
+    }
+    add('<p class="empty">Piano su cui è stesa (gira attorno al primo foro):</p>');
+    segProp(['y', 'z', 'x'].map((n) => [n, FAM_LABEL[n]]), fam(o), (n) => replane(o, n));
     swatches(BEAM_COLORS);
     groupActions();
     delBtn();
@@ -2370,6 +2518,13 @@ function renderInspector() {
     segProp(PULLEY_SIZES.map(([r, t]) => [r, t]), o.r, (v) => (o.r = v));
     numProp('Raggio', o.r, 3, 24, 1, (v) => (o.r = v), 'mm');
     add('<p class="empty">Il braccio di leva del filo attorno al perno è circa uguale al raggio: più grande, più coppia con la stessa forza.</p>');
+    add('<h3 class="sub">Orientamento</h3>');
+    add('<p class="empty">Dove punta l\'asse (tasto <b>R</b> li scorre, <b>Shift+R</b> capovolge):</p>');
+    segProp(['y', 'z', 'x'].map((n) => [n, AXIS_LABEL[n]]), fam(o), (n) => replane(o, n));
+    const fb = add(`<button ${editable ? '' : 'disabled'}>Capovolgi: monta dal lato opposto</button>`);
+    fb.onclick = () => { pushUndo(); flipWheel(o); commit(); };
+    const mnt = mountOf(S.doc, o);
+    add(`<p class="empty">${mnt.kind === 'part' ? `Montato su: ${partLabel(mnt.part).toLowerCase()}.` : mnt.kind === 'board' ? 'Montato sulla base fissa.' : 'Non tocca nessun foro: resta fermo nello spazio. Spostalo con le frecce su un foro.'}</p>`);
     delBtn();
   } else if (f.coll === 'winches') {
     $('inspTitle').textContent = 'Verricello';
@@ -2383,6 +2538,13 @@ function renderInspector() {
       info('Velocità', `${fmt(rad(sp.speed) * o.r, 0)} mm/s`);
       add(`<p class="empty">${sp.name}: ${fmt(sp.kgcm, 1)} kg·cm su un tamburo di ${o.r} mm di raggio. Tamburo più piccolo, più forza ma meno corsa.</p>`);
     } else numProp('Forza max', o.fmax ?? 10, 0.5, 200, 0.5, (v) => (o.fmax = v), 'N');
+    add('<h3 class="sub">Orientamento</h3>');
+    add('<p class="empty">Dove punta l\'asse (tasto <b>R</b> li scorre, <b>Shift+R</b> capovolge):</p>');
+    segProp(['y', 'z', 'x'].map((n) => [n, AXIS_LABEL[n]]), fam(o), (n) => replane(o, n));
+    const fb = add(`<button ${editable ? '' : 'disabled'}>Capovolgi: monta dal lato opposto</button>`);
+    fb.onclick = () => { pushUndo(); flipWheel(o); commit(); };
+    const mnt = mountOf(S.doc, o);
+    add(`<p class="empty">${mnt.kind === 'part' ? `Montato su: ${partLabel(mnt.part).toLowerCase()}.` : mnt.kind === 'board' ? 'Montato sulla base fissa.' : 'Non tocca nessun foro: resta fermo nello spazio. Spostalo con le frecce su un foro.'}</p>`);
     delBtn();
   } else if (f.coll === 'strings') {
     $('inspTitle').textContent = STRING_LABEL[o.kind];
