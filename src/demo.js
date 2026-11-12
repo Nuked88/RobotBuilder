@@ -74,3 +74,16 @@ export function fingerBeltDemo() {
   cross('Accoppiamento 2-3', { p: ph1, i: 2 }, j1, { p: ph2, i: 1, out: 2 }, j2, { p: ph3, i: 1 });
   return d;
 }
+
+// A small arm built in space: a plate of blocks on the baseplate, an MG996R standing on it that
+// turns a turret, and an SG90 on the side of the turret that lifts a beam.
+export function armDemo() {
+  const d = emptyDoc();
+  const add = (p) => { const o = { id: d.nextId++, ...p }; d.parts.push(o); return o; };
+  add({ type: 'block', c: [-24, -56, 8], s: [7, 5, 1], color: '#2b2f36' });                 // base plate
+  add({ type: 'servo', model: 'MG996R', n: 'z', x: 8, z: -40, layer: 7, angle: 180 });       // shaft up
+  add({ type: 'block', c: [0, -40, 56], s: [2, 1, 2], color: '#f2b51c' });                   // turret on the shaft
+  add({ type: 'servo', model: 'SG90', n: 'x', x: -40, z: 64, layer: -4, angle: 0, dir: -1 }); // on the turret, shaft to the left
+  add({ type: 'beam', n: 'x', x: -40, z: 64, layer: -4, angle: 90, holes: 7, color: '#d8342c' }); // the arm, on that shaft
+  return d;
+}

@@ -14,10 +14,12 @@
     </div>
     <div class="group">
       <button id="btnProjects">Progetti</button>
+      <button id="btnTour" title="Tutorial guidato: costruisci un piccolo braccio passo passo">Tutorial</button>
       <div class="menu">
         <button id="btnExample">Esempi ▾</button>
         <div class="menupop" id="exMenu" hidden>
           <button id="btnEx1"><b>Dito con elastici</b><br><span class="sub">Il verricello chiude, tre elastici riaprono</span></button>
+          <button id="btnEx3"><b>Braccio con due servo</b><br><span class="sub">Blocchi, un MG996R che gira la torretta e un SG90 che alza il braccio</span></button>
           <button id="btnEx2"><b>Dito a cinghia</b><br><span class="sub">Un filo chiude e uno riapre, falangi accoppiate, niente molle</span></button>
         </div>
       </div>
@@ -27,6 +29,7 @@
           <button id="btnNew">Nuovo progetto vuoto</button>
           <button id="btnImport">Apri file JSON…</button>
           <button id="btnExportJson">Scarica JSON</button>
+          <button id="btnExportStl">Scarica STL per la stampa 3D<br><span class="sub">I pezzi selezionati, o tutti se non ne hai scelti</span></button>
           <button id="btnExportMjcf">Scarica modello MuJoCo (MJCF)</button>
         </div>
       </div>
@@ -40,25 +43,40 @@
 
   <nav class="tools" id="tools" aria-label="Attrezzi">
     <button data-tool="select" title="Seleziona e trascina (V)"><svg viewBox="0 0 24 24"><path d="M5 3l14 8-6 2-2 6z"/></svg><span>Mano</span><kbd>V</kbd></button>
+    <button data-tool="block" title="Blocco: clicca una faccia per appoggiarlo (C)"><svg viewBox="0 0 24 24"><path d="M12 3 4 7.5v9L12 21l8-4.5v-9z"/><path d="M4 7.5 12 12l8-4.5M12 12v9"/></svg><span>Blocco</span><kbd>C</kbd></button>
     <button data-tool="beam" title="Trave forata (B)"><svg viewBox="0 0 24 24"><rect x="2" y="9" width="20" height="6" rx="3"/><circle cx="5.5" cy="12" r="1.2"/><circle cx="10" cy="12" r="1.2"/><circle cx="14" cy="12" r="1.2"/><circle cx="18.5" cy="12" r="1.2"/></svg><span>Trave</span><kbd>B</kbd></button>
     <button data-tool="pin" title="Perno (P)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2.5"/></svg><span>Perno</span><kbd>P</kbd></button>
+    <button data-tool="join" title="Unisci: foro su foro, il pezzo ci va da solo (J)"><svg viewBox="0 0 24 24"><circle cx="7" cy="12" r="4"/><circle cx="17" cy="12" r="4"/><path d="M11 12h2"/></svg><span>Unisci</span><kbd>J</kbd></button>
+    <button data-tool="servo" title="Servo: SG90, MG90S, MG996R, DS3218… (M)"><svg viewBox="0 0 24 24"><rect x="4" y="8" width="16" height="12" rx="1.5"/><path d="M2 12h2M20 12h2"/><circle cx="9" cy="8" r="3"/><path d="M9 5V2.5"/></svg><span>Servo</span><kbd>M</kbd></button>
     <button data-tool="pulley" title="Puleggia / rinvio (U)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="6"/><path d="M4 4l2 8M20 20l-2-8"/></svg><span>Puleggia</span><kbd>U</kbd></button>
     <button data-tool="string" title="Filo (F)"><svg viewBox="0 0 24 24"><path d="M4 18c4-10 6 2 10-6s4-6 6-8"/><circle cx="4" cy="18" r="1.6"/><circle cx="20" cy="4" r="1.6"/></svg><span>Filo</span><kbd>F</kbd></button>
     <button data-tool="winch" title="Verricello: motore che tira un filo (W)"><svg viewBox="0 0 24 24"><rect x="3" y="7" width="10" height="10" rx="1.5"/><circle cx="17" cy="12" r="4"/><path d="M17 8v-5"/></svg><span>Verricello</span><kbd>W</kbd></button>
     <button data-tool="erase" title="Gomma (X)"><svg viewBox="0 0 24 24"><path d="M4 16l8-8 6 6-6 6H8z"/><path d="M14 20h6"/></svg><span>Gomma</span><kbd>X</kbd></button>
+    <button data-tool="measure" title="Metro: distanza tra due punti (T)"><svg viewBox="0 0 24 24"><path d="M3 16 16 3l5 5L8 21z"/><path d="m7 12 2 2M10 9l2 2M13 6l2 2"/></svg><span>Metro</span><kbd>T</kbd></button>
   </nav>
 
   <main class="stage">
     <div id="viewport" class="viewport"></div>
     <div class="subtools" id="subtools" hidden></div>
+    <div class="typed" id="typed" hidden></div>
+    <div class="selbox" id="selbox" hidden></div>
+    <div class="tour" id="tour" hidden role="dialog" aria-label="Tutorial">
+      <div class="thead"><span id="tourN"></span><span id="tourOk" class="ok" hidden>✓ Fatto</span><button id="tourClose" class="icon" aria-label="Chiudi il tutorial" title="Chiudi il tutorial"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
+      <h3 id="tourT"></h3>
+      <div id="tourB" class="tbody"></div>
+      <div class="actions"><button id="tourBack">Indietro</button><button id="tourAuto" title="Fa questo passo al posto tuo">Fallo tu</button><span class="spacer"></span><button id="tourNext">Avanti</button></div>
+    </div>
     <div class="navcube" id="navcube">
       <div class="navbtns">
         <button id="btnFront" class="icon" title="Vista frontale, centrata sul modello" aria-label="Vista frontale"><svg viewBox="0 0 24 24"><path d="M4 11 12 4l8 7"/><path d="M6 10v9h12v-9"/></svg></button>
+        <button id="btnIso" class="icon" title="Vista 3D di tre quarti, centrata sul modello" aria-label="Vista 3D"><svg viewBox="0 0 24 24"><path d="M12 3 4 7.5v9L12 21l8-4.5v-9z"/><path d="M4 7.5 12 12l8-4.5M12 12v9"/></svg></button>
         <button id="btnSchema" class="chip" title="Pezzi in trasparenza e fili in evidenza, ognuno col suo colore (S)" aria-pressed="false">Vista schema</button>
         <button id="btnProj" class="chip" title="Passa tra vista in prospettiva e ortogonale (senza prospettiva, tutto in asse)">Prospettiva</button>
       </div>
     </div>
     <div class="viewbtns">
+      <button id="btnShowAll" class="chip" hidden>Mostra tutto</button>
+      <label class="chip" title="Mostra il baricentro e il peso totale"><input type="checkbox" id="chkCom"> Baricentro</label>
       <label class="chip"><input type="checkbox" id="chkGravity" checked> Gravità</label>
     </div>
     <div class="runinfo" id="runinfo" hidden>
@@ -68,37 +86,78 @@
     </div>
     <div class="welcome" id="welcome" hidden>
       <div class="card">
-        <h1>Costruisci, poi premi Simula</h1>
+        <h1>Costruisci come coi mattoncini, poi premi Simula</h1>
         <ol>
-          <li><b>Trave</b>: clicca un foro della tavola, poi un secondo punto. Continua a cliccare per aggiungere falangi; ogni nuova trave è già imperniata alla precedente.</li>
-          <li><b>Puleggia</b>: clicca un foro per mettere un rinvio.</li>
-          <li><b>Filo</b>: clicca in sequenza i fori, gli <b>occhielli</b> ai lati delle travi (il filo ci scorre dentro) e le pulegge (dal lato in cui vuoi far passare il filo). Se parti da un <b>verricello</b>, il filo è motorizzato.</li>
+          <li><b>Blocco</b>: clicca una faccia del pavimento, del muro o di un altro pezzo e il blocco ci si appoggia sopra. Trascina per farlo lungo. I blocchi che si toccano restano incollati.</li>
+          <li><b>Servo</b>: scegli il modello (SG90, MG996R…) e clicca un foro. Quello che appoggi sul suo albero gira con lui.</li>
+          <li><b>Trave</b> e <b>Perno</b>: clicca un foro, poi il punto finale. Ogni trave nasce imperniata a quella da cui parte, sul piano della faccia che clicchi.</li>
+          <li><b>Filo</b>, <b>Puleggia</b>, <b>Verricello</b>: per i meccanismi a tendini, come le dita di una mano.</li>
           <li><b>Simula</b>: muovi gli slider a destra o trascina i pezzi col mouse.</li>
         </ol>
-        <p class="mouse">Tasto destro: ruota la vista · rotella: zoom · tasto centrale: sposta · Esc: annulla</p>
+        <p class="mouse">Tasto destro: ruota la vista · rotella: zoom · tasto centrale: sposta · 1–9: attrezzi · Ctrl+Z: annulla</p>
         <div class="actions">
-          <button id="wExample" class="primary">Esempio: dito con elastici</button>
-          <button id="wExample2" class="primary">Esempio: dito a cinghia</button>
-          <button id="wEmpty">Parti da zero</button>
+          <button id="wEmpty" class="primary">Parti da zero</button>
+          <button id="wTour" class="primary">Tutorial guidato (3 minuti)</button>
+          <button id="wExample3">Esempio: braccio con due servo</button>
+          <button id="wExample">Esempio: dito con elastici</button>
+          <button id="wExample2">Esempio: dito a cinghia</button>
         </div>
       </div>
     </div>
   </main>
 
   <aside class="panel" id="panel">
-    <section>
-      <h2>Comandi</h2>
-      <div id="controls" class="controls"></div>
-    </section>
-    <section id="legendSec" hidden>
-      <h2>Fili</h2>
-      <ul id="legend" class="legend"></ul>
-    </section>
-    <section>
-      <h2 id="inspTitle">Selezione</h2>
-      <div id="inspector" class="inspector"></div>
-    </section>
-    <section id="warnSec" hidden>
+    <nav class="tabs" id="tabs" role="tablist" aria-label="Schede del pannello">
+      <button data-tab="props" role="tab" title="Proprietà del pezzo selezionato">Pezzo</button>
+      <button data-tab="controls" role="tab" class="on" title="Slider dei motori, sequenza di pose, fili">Comandi</button>
+      <button data-tab="tree" role="tab" title="Cosa è attaccato a cosa">Albero</button>
+      <button data-tab="lib" role="tab" title="Gruppi pronti da inserire">Libreria</button>
+      <button data-tab="model" role="tab" title="Distinta pezzi e peso">Distinta</button>
+    </nav>
+    <div class="tabpane" data-pane="props" hidden>
+      <section>
+        <h2 id="inspTitle">Selezione</h2>
+        <div id="inspector" class="inspector"></div>
+      </section>
+    </div>
+    <div class="tabpane" data-pane="controls">
+      <section>
+        <h2>Comandi</h2>
+        <div id="controls" class="controls"></div>
+      </section>
+      <section id="seqSec" hidden>
+        <h2>Sequenza di pose</h2>
+        <div id="seq" class="seq"></div>
+      </section>
+      <section id="legendSec" hidden>
+        <h2>Fili</h2>
+        <ul id="legend" class="legend"></ul>
+      </section>
+    </div>
+    <div class="tabpane" data-pane="tree" hidden>
+      <section id="treeSec" hidden>
+        <h2>Cosa è attaccato a cosa</h2>
+        <div id="tree" class="tree"></div>
+      </section>
+      <p class="empty whenempty">Qui compare l'albero del modello appena posi il primo pezzo.</p>
+    </div>
+    <div class="tabpane" data-pane="lib" hidden>
+      <section>
+        <h2>Gruppi pronti</h2>
+        <p class="empty">Un clic e il gruppo compare accanto al tuo modello, già selezionato: trascinalo, uniscilo, specchialo.</p>
+        <div id="lib" class="lib"></div>
+      </section>
+    </div>
+    <div class="tabpane" data-pane="model" hidden>
+      <section id="modelSec" hidden>
+        <h2>Distinta pezzi</h2>
+        <div id="massInfo" class="prop"></div>
+        <ul id="bom" class="bom"></ul>
+        <button id="btnBomCsv">Scarica la distinta (CSV)</button>
+      </section>
+      <p class="empty whenempty">Qui compaiono i pezzi che servono e il peso totale.</p>
+    </div>
+    <section id="warnSec" class="pinned" hidden>
       <h2>Da controllare</h2>
       <ul id="warnings" class="warnings"></ul>
     </section>
