@@ -1564,8 +1564,19 @@ function updateGizmo() {
 function pickGizmo(sx, sy) {
   if (!gizmo.children.length) return null;
   const hits = view.ray(sx, sy).intersectObjects(gizmo.children, true).filter((h) => h.object.userData.giz);
-  const hit = hits.find((h) => h.object.userData.giz.type !== 'rot') || hits[0];
-  return hit ? { ...hit.object.userData.giz, point: hit.point } : null;
+  let hit = hits.find((h) => h.object.userData.giz.type !== 'rot');
+  let facing = 1;
+  if (!hit && hits.length) {
+    // rings overlap on screen: take the one that faces you most, not one seen edge-on
+    const eye = view.toEye(hits[0].point), f = (h) => Math.abs(AX_DIR[h.object.userData.giz.axis].dot(eye));
+    const off = (h) => { // how far from the drawn line of its ring the mouse is
+      const o = h.object, q = view.planeThrough(sx, sy, AX_DIR[o.userData.giz.axis], o.position);
+      return f(h) < 0.3 || !q ? 1000 : Math.abs(q.distanceTo(o.position) - o.geometry.parameters.radius);
+    };
+    hit = hits.reduce((m, h) => (off(h) < off(m) ? h : m), hits[0]);
+    facing = f(hit);
+  }
+  return hit ? { ...hit.object.userData.giz, point: hit.point, facing } : null;
 }
 // How far along the line (p0, dir) the mouse is pointing.
 function axisParam(sx, sy, p0, dir) {
@@ -1666,7 +1677,7 @@ function endRotate() {
   commit();
 }
 function startGizmo(g, sx, sy) {
-  if (g.type === 'rot') { startRotate(g, sx, sy); return; }
+  if (g.type === 'rot') { startRotate(g, sx, sy, g.facing < 0.3); return; } // edge-on ring: turn by dragging sideways
   if (g.type === 'move') {
     const items = moveItems(selIds());
     S.move = { p0: g.point.clone(), axis: g.dir, items, orig: items.map(coordsOf), d: [0, 0, 0], undone: false, selectId: S.selected, keep: true };
